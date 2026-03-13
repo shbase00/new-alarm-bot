@@ -486,6 +486,7 @@ async def detect_opensea_parallel(url: str, slug: str) -> dict:
                 'x_link':             pc_r.get('twitter', ''),
                 'discord_link':       pc_r.get('discord', ''),
                 'total_supply':       pc_r.get('total_supply', 0),
+                'minted':             pc_r.get('minted', 0),
                 'phases':             pc_r['phases'],
                 'success':            True,
                 'needs_manual':       False,
@@ -497,7 +498,9 @@ async def detect_opensea_parallel(url: str, slug: str) -> dict:
                 if col_r.get('contract'):     result['contract']     = col_r['contract']
                 if col_r.get('x_link'):       result['x_link']       = col_r['x_link']
                 if col_r.get('discord_link'): result['discord_link'] = col_r['discord_link']
-                if col_r.get('total_supply'): result['total_supply'] = col_r['total_supply']
+                # Only use OpenSea supply if PC didn't detect one
+                if col_r.get('total_supply') and not result['total_supply']:
+                    result['total_supply'] = col_r['total_supply']
             if not result['name']:
                 result['name'] = slug.replace('-', ' ').title()
             return result
@@ -819,16 +822,52 @@ ETHERSCAN_URLS = {
     'matic':    'https://api.polygonscan.com/api',
 }
 
+async def fetch_supply(mint: dict) -> int | None:
+    """
+    Fetch max supply from OpenSea collections API.
+    Returns int or None.
+    """
+    mint_link = (mint.get('os_link') or mint.get('mint_link') or '').strip()
+    slug = _opensea_slug(mint_link)
+    if not slug:
+        return None
+    api_key = await _os_api_key()
+    if not api_key:
+        return None
+    hdrs = {'x-api-key': api_key, 'Accept': 'application/json'}
+    try:
+        data = await _get(
+            f"https://api.opensea.io/api/v2/collections/{slug}",
+            headers=hdrs, as_json=True, timeout=8
+        )
+        if not data:
+            return None
+        # total_supply on OpenSea collections = max supply for drops
+        supply = (
+            data.get('total_supply') or
+            data.get('max_supply') or
+            (data.get('stats') or {}).get('total_supply') or
+            0
+        )
+        if supply and int(supply) > 0:
+            logger.info(f"[supply] {mint.get('name')}: {supply} via OpenSea")
+            return int(supply)
+    except Exception as e:
+        logger.debug(f"[supply] fetch error for {slug}: {e}")
+    return None
+
+
 async def get_minted_count(mint: dict) -> int | None:
     """
     Get current minted count for a mint.
-    Priority: Etherscan contract call → OpenSea drops API → None
+    Priority: Etherscan totalSupply() call → OpenSea stats → None
+    For NFTs, totalSupply() = how many have been minted so far.
     Returns int or None if unavailable.
     """
     import os
 
-    contract = (mint.get('contract') or '').strip()
-    chain    = (mint.get('chain') or 'Ethereum').lower()
+    contract      = (mint.get('contract') or '').strip()
+    chain         = (mint.get('chain') or 'Ethereum').lower()
     etherscan_key = os.environ.get('ETHERSCAN_API_KEY', '')
 
     # ── 1. Etherscan: call totalSupply() on the contract ──
@@ -843,14 +882,16 @@ async def get_minted_count(mint: dict) -> int | None:
                     f"&apikey={etherscan_key}"
                 )
                 data = await _get(url, as_json=True, timeout=8)
-                if data and data.get('result') and data['result'] != '0x':
-                    count = int(data['result'], 16)
-                    logger.info(f"[minted] {mint.get('name')}: {count} via Etherscan")
-                    return count
+                result = (data or {}).get('result', '')
+                if result and result not in ('0x', '0x0', '', None):
+                    count = int(result, 16)
+                    if count > 0:
+                        logger.info(f"[minted] {mint.get('name')}: {count:,} via Etherscan")
+                        return count
             except Exception as e:
                 logger.debug(f"[minted] Etherscan error for {mint.get('name')}: {e}")
 
-    # ── 2. OpenSea drops API fallback ──
+    # ── 2. OpenSea collections stats fallback ──
     mint_link = (mint.get('os_link') or mint.get('mint_link') or '').strip()
     slug = _opensea_slug(mint_link)
     if slug:
@@ -858,6 +899,7 @@ async def get_minted_count(mint: dict) -> int | None:
         if api_key:
             hdrs = {'x-api-key': api_key, 'Accept': 'application/json'}
             try:
+                # Try drops API first (has total_minted for live drops)
                 data = await _get(
                     f"https://api.opensea.io/api/v2/drops/{slug}",
                     headers=hdrs, as_json=True, timeout=8
@@ -869,10 +911,24 @@ async def get_minted_count(mint: dict) -> int | None:
                         (data.get('drop') or {}).get('total_minted') or 0
                     )
                     if minted > 0:
-                        logger.info(f"[minted] {mint.get('name')}: {minted} via OpenSea drops")
+                        logger.info(f"[minted] {mint.get('name')}: {minted:,} via OpenSea drops")
                         return minted
             except Exception as e:
                 logger.debug(f"[minted] OpenSea drops error for {mint.get('name')}: {e}")
+
+            try:
+                # Fallback: collections stats
+                data = await _get(
+                    f"https://api.opensea.io/api/v2/collections/{slug}/stats",
+                    headers=hdrs, as_json=True, timeout=8
+                )
+                if data:
+                    total = int((data.get('total') or {}).get('supply', 0) or 0)
+                    if total > 0:
+                        logger.info(f"[minted] {mint.get('name')}: {total:,} via OpenSea stats")
+                        return total
+            except Exception as e:
+                logger.debug(f"[minted] OpenSea stats error for {mint.get('name')}: {e}")
 
     return None
 

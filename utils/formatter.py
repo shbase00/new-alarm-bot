@@ -24,6 +24,14 @@ def _esc_html(text: str) -> str:
     return str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 
+def _esc_md(text: str) -> str:
+    """Escape Markdown special characters to prevent parse errors."""
+    text = str(text)
+    for ch in ['\\', '*', '_', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
+        text = text.replace(ch, f'\\{ch}')
+    return text
+
+
 def get_chain_emoji(chain: str) -> str:
     return CHAIN_EMOJIS.get((chain or '').lower(), '⛓')
 
@@ -32,30 +40,31 @@ def get_status_emoji(status: str) -> str:
     return STATUS_EMOJIS.get(status, '⏳')
 
 
-# ── ADMIN DASHBOARD FUNCTIONS (Markdown) ──────────────────────
+# ── ADMIN DASHBOARD FUNCTIONS (HTML) ──────────────────────────
 
 def format_mint_card(mint: dict) -> str:
-    """Format a single mint as a detailed info card. Returns Markdown."""
+    """Format a single mint as a detailed info card. Returns HTML."""
     chain        = mint.get('chain', 'Unknown')
     chain_emoji  = get_chain_emoji(chain)
     status       = mint.get('status', 'upcoming')
     status_emoji = get_status_emoji(status)
-    paused       = "⏸ *PAUSED*\n" if mint.get('paused') else ""
+    paused       = "⏸ <b>PAUSED</b>\n" if mint.get('paused') else ""
+    name         = _esc_html(mint.get('name', 'Unknown'))
 
     lines = [
-        f"{paused}📛 *{mint['name']}*",
-        f"{chain_emoji} {chain}  {status_emoji} {status.upper()}",
-        f"🔗 {mint.get('mint_link', 'No link')}",
+        f"{paused}📛 <b>{name}</b>",
+        f"{chain_emoji} {_esc_html(chain)}  {status_emoji} {status.upper()}",
+        f"🔗 {_esc_html(mint.get('mint_link', 'No link'))}",
         "",
     ]
 
     if mint.get('total_supply'):
         minted = mint.get('minted', 0) or 0
-        lines.append(f"📦 Supply: {minted} / {mint['total_supply']:,}")
+        lines.append(f"📦 Supply: {minted:,} / {mint['total_supply']:,}")
 
     phases = mint.get('phases', [])
     if phases:
-        lines.append(f"\n📋 *{len(phases)} Phase(s):*\n")
+        lines.append(f"\n📋 <b>{len(phases)} Phase(s):</b>\n")
         for i, p in enumerate(phases, 1):
             time_str = p.get('time', 'TBA') or 'TBA'
             end_time = p.get('end_time', '')
@@ -64,45 +73,45 @@ def format_mint_card(mint: dict) -> str:
             else:
                 time_display = f"{time_str} UTC" if time_str != 'TBA' else 'TBA'
             lines.append(
-                f"*Phase {i}: {p.get('name', '?')}*\n"
-                f"  🕐 {time_display}\n"
-                f"  💰 {p.get('price', 'TBA')}\n"
+                f"<b>Phase {i}: {_esc_html(p.get('name', '?'))}</b>\n"
+                f"  🕐 {_esc_html(time_display)}\n"
+                f"  💰 {_esc_html(p.get('price', 'TBA'))}\n"
             )
     else:
         lines.append("📋 No phases set yet.")
 
     if mint.get('x_link'):
-        lines.append(f"🐦 {mint['x_link']}")
+        lines.append(f"🐦 {_esc_html(mint['x_link'])}")
     if mint.get('discord_link'):
-        lines.append(f"💬 {mint['discord_link']}")
+        lines.append(f"💬 {_esc_html(mint['discord_link'])}")
     if mint.get('os_link'):
-        lines.append(f"🌊 {mint['os_link']}")
+        lines.append(f"🌊 {_esc_html(mint['os_link'])}")
 
     if mint.get('notes'):
-        lines.append(f"\n_{mint['notes']}_")
+        lines.append(f"\n<i>{_esc_html(mint['notes'])}</i>")
 
     return "\n".join(lines)
 
 
 def format_mint_list(mints: list) -> str:
-    """Format list of all mints for dashboard. Returns Markdown."""
+    """Format list of all mints for dashboard. Returns HTML."""
     if not mints:
         return "No mints added yet. Use ➕ Add Mint to get started!"
 
-    lines = ["📋 *All Tracked Mints*\n"]
+    lines = ["📋 <b>All Tracked Mints</b>\n"]
     for m in mints:
         status_emoji = get_status_emoji(m.get('status', 'upcoming'))
         paused       = "⏸" if m.get('paused') else ""
         chain_emoji  = get_chain_emoji(m.get('chain', 'Unknown'))
-        phases = m.get('phases', [])
-        time_hint = ''
+        phases       = m.get('phases', [])
+        time_hint    = ''
         for p in phases:
             t = p.get('time', '')
             if t:
-                time_hint = f" — {t} UTC"
+                time_hint = f" — {_esc_html(t)} UTC"
                 break
         lines.append(
-            f"{status_emoji}{paused} *{m['name']}* {chain_emoji} "
+            f"{status_emoji}{paused} <b>{_esc_html(m['name'])}</b> {chain_emoji} "
             f"(#{m['id']}){time_hint}"
         )
 
@@ -151,22 +160,40 @@ def format_daily_summary(mints_today: list) -> str:
 
     lines = ["📅 <b>TODAY'S MINTS</b>\n"]
 
-    for idx, (mint, phase) in enumerate(mints_today):
+    # Group by mint (mints_today may have duplicate mints with different phases)
+    seen_ids = {}
+    grouped = []
+    for mint, phase in mints_today:
+        mid = mint.get('id')
+        if mid not in seen_ids:
+            seen_ids[mid] = len(grouped)
+            grouped.append((mint, [phase]))
+        else:
+            grouped[seen_ids[mid]][1].append(phase)
+
+    for idx, (mint, phases) in enumerate(grouped):
         num_emoji   = NUMBER_EMOJIS[idx] if idx < len(NUMBER_EMOJIS) else f"{idx + 1}."
         chain       = mint.get('chain', 'Unknown')
         chain_emoji = get_chain_emoji(chain)
-        price       = _esc_html(phase.get('price', 'TBA'))
-        time_str    = _esc_html(phase.get('time', 'TBA') or 'TBA')
-        phase_name  = _esc_html(phase.get('name', 'Phase'))
         name        = _esc_html(mint.get('name', 'Unknown'))
         mint_link   = mint.get('mint_link', '')
         link_html   = f'<a href="{mint_link}">Mint Link</a>' if mint_link else 'No link'
 
+        # Use all phases from the mint, not just today's first phase
+        all_phases = mint.get('phases') or phases
+
+        phase_lines = []
+        for p in all_phases:
+            p_name   = _esc_html(p.get('name', 'Phase'))
+            p_price  = _esc_html(p.get('price', 'TBA'))
+            p_time   = _esc_html(p.get('time', 'TBA') or 'TBA')
+            phase_lines.append(f"   ┣ <b>{p_name}</b> — {p_price} — 🕐 {p_time} UTC")
+
+        phases_text = "\n".join(phase_lines)
+
         lines.append(
-            f"{num_emoji} <b>{name}</b>\n"
-            f"   🕐 {phase_name}: {time_str}\n"
-            f"   {chain_emoji} {_esc_html(chain)}\n"
-            f"   💰 {price}\n"
+            f"{num_emoji} <b>{name}</b>  {chain_emoji} {_esc_html(chain)}\n"
+            f"{phases_text}\n"
             f"   🔗 {link_html}"
         )
         lines.append("")

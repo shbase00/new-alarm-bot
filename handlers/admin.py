@@ -104,9 +104,18 @@ def edit_field_kb(mint_id):
          InlineKeyboardButton("💬 Discord",  callback_data=f"ef_{mint_id}_discord_link")],
         [InlineKeyboardButton("🌊 OS Market", callback_data=f"ef_{mint_id}_os_link"),
          InlineKeyboardButton("📦 Supply",   callback_data=f"ef_{mint_id}_total_supply")],
-        [InlineKeyboardButton("📊 Status",   callback_data=f"ef_{mint_id}_status")],
+        [InlineKeyboardButton("📊 Status",   callback_data=f"status_pick_{mint_id}")],
         [InlineKeyboardButton("📝 Notes",    callback_data=f"ef_{mint_id}_notes")],
         [InlineKeyboardButton("🔙 Cancel",   callback_data=f"view_mint_{mint_id}")],
+    ])
+
+def status_pick_kb(mint_id):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏳ Upcoming",  callback_data=f"set_status_{mint_id}_upcoming"),
+         InlineKeyboardButton("🟢 Live",      callback_data=f"set_status_{mint_id}_live")],
+        [InlineKeyboardButton("🔴 Sold Out",  callback_data=f"set_status_{mint_id}_sold_out"),
+         InlineKeyboardButton("⚫ Ended",     callback_data=f"set_status_{mint_id}_ended")],
+        [InlineKeyboardButton("🔙 Back",      callback_data=f"edit_mint_{mint_id}")],
     ])
 
 def confirm_delete_kb(mint_id):
@@ -253,7 +262,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return datetime(9999,1,1)
         mints = sorted(mints, key=_first_time)
         await query.edit_message_text(
-            format_mint_list(mints), parse_mode='Markdown', reply_markup=mint_list_kb(mints)
+            format_mint_list(mints), parse_mode='HTML', reply_markup=mint_list_kb(mints)
         )
 
     elif data.startswith("view_mint_"):
@@ -264,7 +273,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="view_mints")]]))
             return
         await query.edit_message_text(
-            format_mint_card(mint), parse_mode='Markdown',
+            format_mint_card(mint), parse_mode='HTML',
             reply_markup=mint_detail_kb(mint_id, bool(mint.get('paused'))),
             disable_web_page_preview=True
         )
@@ -288,6 +297,38 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("✅ Daily summary sent!",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Dashboard", callback_data="dashboard")]]))
 
+    elif data.startswith("status_pick_"):
+        mint_id = int(data.replace("status_pick_", ""))
+        mint = get_mint(mint_id)
+        if not mint:
+            await query.edit_message_text("❌ Mint not found.")
+            return
+        current = mint.get('status', 'upcoming')
+        await query.edit_message_text(
+            f"📊 <b>Set Status: {mint['name']}</b>\n\nCurrent: <b>{current.upper()}</b>\n\nChoose new status:",
+            parse_mode='HTML', reply_markup=status_pick_kb(mint_id)
+        )
+
+    elif data.startswith("set_status_"):
+        # set_status_{mint_id}_{status}
+        parts   = data.split("_", 3)  # ['set', 'status', mint_id, status_value]
+        mint_id = int(parts[2])
+        new_status = parts[3]
+        mint = get_mint(mint_id)
+        if not mint:
+            await query.edit_message_text("❌ Mint not found.")
+            return
+        update_mint(mint_id, status=new_status)
+        mint = get_mint(mint_id)
+        status_labels = {'upcoming': '⏳', 'live': '🟢', 'sold_out': '🔴', 'ended': '⚫'}
+        emoji = status_labels.get(new_status, '📊')
+        await query.edit_message_text(
+            f"{emoji} Status updated to <b>{new_status.upper()}</b>\n\n" + format_mint_card(mint),
+            parse_mode='HTML',
+            reply_markup=mint_detail_kb(mint_id, bool(mint.get('paused'))),
+            disable_web_page_preview=True
+        )
+
     elif data.startswith("edit_mint_"):
         mint_id = int(data.replace("edit_mint_", ""))
         mint = get_mint(mint_id)
@@ -295,8 +336,8 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Mint not found.")
             return
         await query.edit_message_text(
-            f"✏️ *Edit: {mint['name']}*\n\nChoose what to edit:",
-            parse_mode='Markdown', reply_markup=edit_field_kb(mint_id)
+            f"✏️ <b>Edit: {mint['name']}</b>\n\nChoose what to edit:",
+            parse_mode='HTML', reply_markup=edit_field_kb(mint_id)
         )
 
     elif data.startswith("ef_"):
@@ -438,7 +479,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         mint = get_mint(mint_id)
         await query.edit_message_text(
             f"🏪 *Get Market Links*\n\n"
-            f"Send the contract address for *{mint['name']}*\n\n"
+            f"Send the contract address for <b>{mint['name']}</b>\n\n"
             f"Example: `0xAbCd1234...`\n\n"
             f"_/cancel to go back._",
             parse_mode='Markdown',
@@ -506,8 +547,8 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         delete_mint(mint_id)
         mints   = get_all_mints()
         await query.edit_message_text(
-            f"✅ *{name}* deleted.\n\n" + format_mint_list(mints),
-            parse_mode='Markdown', reply_markup=mint_list_kb(mints)
+            f"✅ <b>{name}</b> deleted.\n\n" + format_mint_list(mints),
+            parse_mode='HTML', reply_markup=mint_list_kb(mints)
         )
 
     elif data.startswith("toggle_pause_"):
@@ -519,8 +560,8 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         mint  = get_mint(mint_id)
         label = "⏸ Paused" if new_paused else "▶️ Resumed"
         await query.edit_message_text(
-            f"{label} alerts for *{mint['name']}*\n\n" + format_mint_card(mint),
-            parse_mode='Markdown',
+            f"{label} alerts for <b>{mint['name']}</b>\n\n" + format_mint_card(mint),
+            parse_mode='HTML',
             reply_markup=mint_detail_kb(mint_id, bool(new_paused)),
             disable_web_page_preview=True
         )
@@ -641,8 +682,8 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.clear()
         mint = get_mint(mint_id)
         await query.edit_message_text(
-            f"✅ *Phases saved!* ({len(phases)} phases)\n\n" + format_mint_card(mint),
-            parse_mode='Markdown',
+            f"✅ <b>Phases saved!</b> ({len(phases)} phases)\n\n" + format_mint_card(mint),
+            parse_mode='HTML',
             reply_markup=mint_detail_kb(mint_id, bool(mint.get('paused'))),
             disable_web_page_preview=True
         )
@@ -730,6 +771,7 @@ async def add_mint_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if d.get('discord_link'): extras['discord_link'] = d['discord_link']
         if d.get('contract'):     extras['contract']     = d['contract']
         if d.get('total_supply'): extras['total_supply'] = d['total_supply']
+        if d.get('minted'):       extras['minted']       = d['minted']
         ml = d.get('market_links')
         if ml:
             # Pass dict directly — update_mint handles JSON serialization
@@ -1094,7 +1136,7 @@ async def pb_done_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text(
         f"🎉 *All phases saved!*\n\n"
-        f"📛 *{mint['name']}*\n\n"
+        f"📛 <b>{mint['name']}</b>\n\n"
         f"{preview}",
         parse_mode='Markdown',
         reply_markup=mint_detail_kb(mint_id, bool(mint.get('paused')))
@@ -1259,7 +1301,7 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if not isinstance(phases, list):
                 raise ValueError("Must be a JSON list")
             update_mint(mint_id, phases=phases)
-            success_msg = f"✅ *Phases updated!* ({len(phases)} phases)"
+            success_msg = f"✅ <b>Phases updated!</b> ({len(phases)} phases)"
         except Exception as e:
             await update.message.reply_text(
                 f"❌ *Invalid format.*\nError: `{e}`\n\n"
@@ -1273,7 +1315,7 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             supply = int(new_value.replace(',', '').strip())
             update_mint(mint_id, total_supply=supply)
-            success_msg = f"✅ *Supply* updated to {supply:,}!"
+            success_msg = f"✅ <b>Supply</b> updated to {supply:,}!"
         except ValueError:
             await update.message.reply_text(
                 "❌ Supply must be a number (e.g. `5000`)\n\nTry again or /cancel.",
@@ -1282,13 +1324,13 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return WAITING_EDIT_VALUE
     else:
         update_mint(mint_id, **{field: new_value})
-        success_msg = f"✅ *{field.replace('_',' ').title()}* updated!"
+        success_msg = f"✅ <b>{field.replace('_',' ').title()}</b> updated!"
 
     ctx.user_data.clear()
     mint = get_mint(mint_id)
     await update.message.reply_text(
         f"{success_msg}\n\n" + format_mint_card(mint),
-        parse_mode='Markdown',
+        parse_mode='HTML',
         reply_markup=mint_detail_kb(mint_id, bool(mint.get('paused'))),
         disable_web_page_preview=True
     )

@@ -290,10 +290,28 @@ async def _scrape(url: str) -> dict:
                 return results;
             }""")
 
-            # Supply
-            supply_m = re.search(r'(\d[\d,]+)\s+(?:items?|supply|total)', page_text, re.IGNORECASE)
-            if supply_m:
-                result['total_supply'] = int(supply_m.group(1).replace(',', ''))
+            # Supply — detect "Items minted X / Y" or "X / Y items" or "X items"
+            supply_patterns = [
+                r'[Ii]tems?\s+minted\s+[\d,]+\s*/\s*([\d,]+)',   # Items minted 3,382 / 4,000
+                r'([\d,]+)\s*/\s*([\d,]+)\s+[Ii]tems?',           # 3,382 / 4,000 items
+                r'(\d[\d,]+)\s+(?:items?|supply|total)',            # 4,000 items
+            ]
+            for pat in supply_patterns:
+                sm = re.search(pat, page_text)
+                if sm:
+                    # Last group is always the max supply
+                    raw = sm.group(sm.lastindex).replace(',', '')
+                    val = int(raw)
+                    if val > 0:
+                        result['total_supply'] = val
+                        # Also grab minted count if available (first group in pattern 1)
+                        if sm.lastindex > 1:
+                            try:
+                                minted_raw = sm.group(1).replace(',', '')
+                                result['minted'] = int(minted_raw)
+                            except Exception:
+                                pass
+                        break
 
             # Social links
             links = await page.evaluate("""function(){
@@ -312,6 +330,32 @@ async def _scrape(url: str) -> dict:
             phases = _parse_li_items(schedule_data) if schedule_data else []
             if not phases:
                 phases = _parse_page_text(page_text)
+
+            # ── Live mint fallback: if no schedule found but mint is live ──
+            if not phases:
+                now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+                # Check for live mint indicators in page text
+                live_indicators = [
+                    'mint now', 'minting now', 'mint is live', 'buy now',
+                    'claim now', 'public mint', 'open edition'
+                ]
+                page_lower = page_text.lower()
+                is_live = any(ind in page_lower for ind in live_indicators)
+
+                if is_live:
+                    # Try to extract price from page
+                    price = 'Free'
+                    price_m = re.search(r'([\d.]+)\s*(ETH|eth|Sol|sol|MATIC|matic)', page_text)
+                    if price_m:
+                        val = float(price_m.group(1))
+                        price = 'Free' if val == 0 else f"{price_m.group(1)} {price_m.group(2).upper()}"
+                    phases = [{
+                        'name': 'Public Mint',
+                        'time': now_utc,
+                        'price': price,
+                        'limit': 'N/A',
+                    }]
+                    logger.info(f"Live mint detected for: {url} — using now as start time")
 
             if phases:
                 result['phases']  = phases
