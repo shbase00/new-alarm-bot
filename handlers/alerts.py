@@ -322,6 +322,26 @@ async def check_floor_and_sweeps():
         if mint.get('status') not in ('live', 'sold_out'):
             continue
 
+        # Auto-fetch contract if missing
+        if not mint.get('contract'):
+            try:
+                from utils.parser import fetch_contract_address
+                contract = await fetch_contract_address(mint)
+                if contract:
+                    update_mint(mint['id'], contract=contract)
+                    mint = dict(mint)
+                    mint['contract'] = contract
+                    logger.info(f"[contract] Auto-fetched for {mint.get('name')}: {contract}")
+            except Exception as e:
+                logger.debug(f"[contract] fetch error for {mint.get('name')}: {e}")
+
+        # Track minted count + trigger sold-out
+        if mint.get('status') != 'sold_out':
+            try:
+                await _track_minted(mint)
+            except Exception as e:
+                logger.debug(f"Minted track error for {mint.get('name')}: {e}")
+
         try:
             await _check_floor(mint)
         except Exception as e:
@@ -331,6 +351,26 @@ async def check_floor_and_sweeps():
             await _check_sweep(mint)
         except Exception as e:
             logger.debug(f"Sweep check error for {mint.get('name')}: {e}")
+
+
+async def _track_minted(mint: dict):
+    """Fetch current minted count and trigger sold-out if reached."""
+    from utils.parser import get_minted_count
+    minted = await get_minted_count(mint)
+    if minted is None:
+        return
+
+    # Always update the minted count in DB
+    update_mint(mint['id'], minted=minted)
+    logger.info(f"[minted] {mint.get('name')}: {minted} / {mint.get('total_supply', 0)}")
+
+    # Check sold-out
+    total_supply = mint.get('total_supply', 0) or 0
+    if total_supply and minted >= total_supply:
+        phase = (mint.get('phases') or [{}])[0]
+        mint_updated = dict(mint)
+        mint_updated['minted'] = minted
+        await _trigger_sold_out(mint_updated, phase)
 
 
 async def _check_floor(mint: dict):

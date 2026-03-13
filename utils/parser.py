@@ -805,3 +805,106 @@ async def get_recent_sales_count(mint: dict, window_seconds: int = 60) -> int | 
     except Exception as e:
         logger.debug(f"get_recent_sales_count error for {slug}: {e}")
     return None
+
+
+# ─────────────────────────────────────────────
+# Minted Count Tracker (Etherscan + OpenSea)
+# ─────────────────────────────────────────────
+
+ETHERSCAN_URLS = {
+    'ethereum': 'https://api.etherscan.io/api',
+    'eth':      'https://api.etherscan.io/api',
+    'base':     'https://api.basescan.org/api',
+    'polygon':  'https://api.polygonscan.com/api',
+    'matic':    'https://api.polygonscan.com/api',
+}
+
+async def get_minted_count(mint: dict) -> int | None:
+    """
+    Get current minted count for a mint.
+    Priority: Etherscan contract call → OpenSea drops API → None
+    Returns int or None if unavailable.
+    """
+    import os
+
+    contract = (mint.get('contract') or '').strip()
+    chain    = (mint.get('chain') or 'Ethereum').lower()
+    etherscan_key = os.environ.get('ETHERSCAN_API_KEY', '')
+
+    # ── 1. Etherscan: call totalSupply() on the contract ──
+    if contract and etherscan_key:
+        base_url = ETHERSCAN_URLS.get(chain)
+        if base_url:
+            try:
+                # totalSupply() function selector = 0x18160ddd
+                url = (
+                    f"{base_url}?module=proxy&action=eth_call"
+                    f"&to={contract}&data=0x18160ddd&tag=latest"
+                    f"&apikey={etherscan_key}"
+                )
+                data = await _get(url, as_json=True, timeout=8)
+                if data and data.get('result') and data['result'] != '0x':
+                    count = int(data['result'], 16)
+                    logger.info(f"[minted] {mint.get('name')}: {count} via Etherscan")
+                    return count
+            except Exception as e:
+                logger.debug(f"[minted] Etherscan error for {mint.get('name')}: {e}")
+
+    # ── 2. OpenSea drops API fallback ──
+    mint_link = (mint.get('os_link') or mint.get('mint_link') or '').strip()
+    slug = _opensea_slug(mint_link)
+    if slug:
+        api_key = await _os_api_key()
+        if api_key:
+            hdrs = {'x-api-key': api_key, 'Accept': 'application/json'}
+            try:
+                data = await _get(
+                    f"https://api.opensea.io/api/v2/drops/{slug}",
+                    headers=hdrs, as_json=True, timeout=8
+                )
+                if data:
+                    minted = int(
+                        data.get('total_minted') or
+                        data.get('totalMinted') or
+                        (data.get('drop') or {}).get('total_minted') or 0
+                    )
+                    if minted > 0:
+                        logger.info(f"[minted] {mint.get('name')}: {minted} via OpenSea drops")
+                        return minted
+            except Exception as e:
+                logger.debug(f"[minted] OpenSea drops error for {mint.get('name')}: {e}")
+
+    return None
+
+
+async def fetch_contract_address(mint: dict) -> str | None:
+    """
+    Fetch contract address from OpenSea if not already set.
+    Returns contract address string or None.
+    """
+    mint_link = (mint.get('os_link') or mint.get('mint_link') or '').strip()
+    slug = _opensea_slug(mint_link)
+    if not slug:
+        return None
+    api_key = await _os_api_key()
+    if not api_key:
+        return None
+    hdrs = {'x-api-key': api_key, 'Accept': 'application/json'}
+    try:
+        data = await _get(
+            f"https://api.opensea.io/api/v2/collections/{slug}",
+            headers=hdrs, as_json=True, timeout=8
+        )
+        if not data:
+            return None
+        # Try contracts array first
+        contracts = data.get('contracts') or []
+        if contracts and isinstance(contracts, list):
+            addr = contracts[0].get('address') or contracts[0].get('contract_address')
+            if addr:
+                return addr
+        # Fallback to top-level contract field
+        return data.get('contract') or data.get('contract_address') or None
+    except Exception as e:
+        logger.debug(f"[contract] fetch error for {slug}: {e}")
+    return None
