@@ -101,7 +101,9 @@ def edit_field_kb(mint_id):
         [InlineKeyboardButton("⏱ Rebuild Phases", callback_data=f"rebuild_phases_{mint_id}"),
          InlineKeyboardButton("🏪 Get Market Links", callback_data=f"get_markets_{mint_id}")],
         [InlineKeyboardButton("🐦 X Link",   callback_data=f"ef_{mint_id}_x_link"),
-         InlineKeyboardButton("🌊 OS Market", callback_data=f"ef_{mint_id}_os_link")],
+         InlineKeyboardButton("💬 Discord",  callback_data=f"ef_{mint_id}_discord_link")],
+        [InlineKeyboardButton("🌊 OS Market", callback_data=f"ef_{mint_id}_os_link"),
+         InlineKeyboardButton("📦 Supply",   callback_data=f"ef_{mint_id}_total_supply")],
         [InlineKeyboardButton("📊 Status",   callback_data=f"ef_{mint_id}_status")],
         [InlineKeyboardButton("📝 Notes",    callback_data=f"ef_{mint_id}_notes")],
         [InlineKeyboardButton("🔙 Cancel",   callback_data=f"view_mint_{mint_id}")],
@@ -1264,6 +1266,17 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 "Example:\n"
                 '`[{"name":"OG","time":"2024-12-25 18:00","price":"0.02 ETH","limit":"2"}]`\n\n'
                 "Try again or /cancel.",
+                parse_mode='Markdown'
+            )
+            return WAITING_EDIT_VALUE
+    elif field == 'total_supply':
+        try:
+            supply = int(new_value.replace(',', '').strip())
+            update_mint(mint_id, total_supply=supply)
+            success_msg = f"✅ *Supply* updated to {supply:,}!"
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Supply must be a number (e.g. `5000`)\n\nTry again or /cancel.",
                 parse_mode='Markdown'
             )
             return WAITING_EDIT_VALUE

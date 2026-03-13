@@ -85,27 +85,15 @@ def _esc(text: str) -> str:
 
 # ── ALERT FORMATTERS ─────────────────────────────────────────
 
-def _format_mint_alert(mint: dict, alert_type: str = 'pre') -> str:
-    """
-    Format:
-    🚨 MINT ALERT
-    Collection Name
-    ⟠ Network
-    Supply: minted / total_supply
-    Phase Name
-    Price
-    Time
-    ...
-    Mint | Twitter | Discord
-    """
-    name = _esc(mint.get('name', 'Unknown'))
-    chain = mint.get('chain', 'Unknown')
-    chain_emoji = _chain_emoji(chain)
-    minted = mint.get('minted', 0) or 0
+def _format_mint_alert(mint: dict, alert_type: str = 'pre', phase: dict = None) -> str:
+    name         = _esc(mint.get('name', 'Unknown'))
+    chain        = mint.get('chain', 'Unknown')
+    chain_emoji  = _chain_emoji(chain)
+    minted       = mint.get('minted', 0) or 0
     total_supply = mint.get('total_supply', 0) or 0
 
     if alert_type == 'live':
-        header = '🚨 MINT ALERT'
+        header = '🚨 MINT IS LIVE'
     else:
         header = '🚨 MINT ALERT'
 
@@ -114,18 +102,29 @@ def _format_mint_alert(mint: dict, alert_type: str = 'pre') -> str:
     lines.append(f'{chain_emoji} {_esc(chain)}')
 
     if total_supply:
-        lines.append(f'Supply: {minted} / {total_supply:,}')
+        lines.append(f'Supply: {minted:,} / {total_supply:,}')
 
     lines.append('')
 
-    for phase in mint.get('phases', []):
+    # Show only the specific phase that triggered this alert
+    if phase:
         phase_name = _esc(phase.get('name', 'Phase'))
-        price = _esc(phase.get('price', 'TBA'))
-        time_str = _esc(phase.get('time', 'TBA') or 'TBA')
+        price      = _esc(phase.get('price', 'TBA'))
+        time_str   = _esc(phase.get('time', 'TBA') or 'TBA')
         lines.append(f'<b>{phase_name}</b>')
         lines.append(price)
         lines.append(f'🕐 {time_str} UTC')
         lines.append('')
+    else:
+        # Fallback: show all phases (should not happen normally)
+        for p in mint.get('phases', []):
+            phase_name = _esc(p.get('name', 'Phase'))
+            price      = _esc(p.get('price', 'TBA'))
+            time_str   = _esc(p.get('time', 'TBA') or 'TBA')
+            lines.append(f'<b>{phase_name}</b>')
+            lines.append(price)
+            lines.append(f'🕐 {time_str} UTC')
+            lines.append('')
 
     links = _build_links_html(mint)
     if links:
@@ -212,14 +211,14 @@ async def check_and_send_alerts():
                 alert_key = f"pre_{ALERT_MINUTES_BEFORE}min"
                 if not alert_already_sent(mint['id'], phase_name, alert_key):
                     for ch_id in get_alert_channels_for_mint(mint):
-                        pre_buckets[ch_id].append(mint)
+                        pre_buckets[ch_id].append((mint, phase))
                     mark_alert_sent(mint['id'], phase_name, alert_key)
 
             # Live alert
             if -2 <= time_diff <= 2:
                 if not alert_already_sent(mint['id'], phase_name, 'live'):
                     for ch_id in get_alert_channels_for_mint(mint):
-                        live_buckets[ch_id].append(mint)
+                        live_buckets[ch_id].append((mint, phase))
                     mark_alert_sent(mint['id'], phase_name, 'live')
                     update_mint(mint['id'], status='live')
 
@@ -229,31 +228,31 @@ async def check_and_send_alerts():
                     mark_alert_sent(mint['id'], phase_name, 'soldout_check')
                     asyncio.ensure_future(_check_sold_out(mint, phase))
 
-    for ch_id, mints_list in pre_buckets.items():
+    for ch_id, pairs in pre_buckets.items():
         seen = set()
-        unique = [m for m in mints_list if not (m['id'] in seen or seen.add(m['id']))]
-        for mint in unique:
+        unique = [(m, p) for m, p in pairs if not (m['id'] in seen or seen.add(m['id']))]
+        for mint, phase in unique:
             try:
-                msg = _format_mint_alert(mint, alert_type='pre')
+                msg = _format_mint_alert(mint, alert_type='pre', phase=phase)
                 await _app.bot.send_message(
                     chat_id=ch_id, text=msg, parse_mode='HTML',
                     disable_web_page_preview=True
                 )
-                logger.info(f"Pre-mint alert sent to {ch_id} for {mint['name']}")
+                logger.info(f"Pre-mint alert sent to {ch_id} for {mint['name']} / {phase.get('name')}")
             except Exception as e:
                 logger.error(f"Pre alert send error {ch_id}: {e}")
 
-    for ch_id, mints_list in live_buckets.items():
+    for ch_id, pairs in live_buckets.items():
         seen = set()
-        unique = [m for m in mints_list if not (m['id'] in seen or seen.add(m['id']))]
-        for mint in unique:
+        unique = [(m, p) for m, p in pairs if not (m['id'] in seen or seen.add(m['id']))]
+        for mint, phase in unique:
             try:
-                msg = _format_mint_alert(mint, alert_type='live')
+                msg = _format_mint_alert(mint, alert_type='live', phase=phase)
                 await _app.bot.send_message(
                     chat_id=ch_id, text=msg, parse_mode='HTML',
                     disable_web_page_preview=True
                 )
-                logger.info(f"Live alert sent to {ch_id} for {mint['name']}")
+                logger.info(f"Live alert sent to {ch_id} for {mint['name']} / {phase.get('name')}")
             except Exception as e:
                 logger.error(f"Live alert send error {ch_id}: {e}")
 
@@ -460,16 +459,18 @@ async def trigger_mint_alert_from_api(mint: dict):
     channels = get_alert_channels_for_mint(mint)
 
     # Determine alert type from first phase time
-    alert_type = 'pre'
+    alert_type  = 'pre'
+    first_phase = (mint.get('phases') or [{}])[0]
     for phase in mint.get('phases', []):
         phase_time = parse_phase_time(phase.get('time', ''))
         if phase_time:
             time_diff = (phase_time - now).total_seconds() / 60
             if time_diff <= 2:
                 alert_type = 'live'
+            first_phase = phase
             break
 
-    msg = _format_mint_alert(mint, alert_type=alert_type)
+    msg = _format_mint_alert(mint, alert_type=alert_type, phase=first_phase)
     for ch_id in channels:
         try:
             await _app.bot.send_message(
