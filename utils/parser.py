@@ -821,13 +821,17 @@ async def get_recent_sales_count(mint: dict, window_seconds: int = 60) -> int | 
 # Minted Count Tracker (Etherscan + OpenSea)
 # ─────────────────────────────────────────────
 
-ETHERSCAN_URLS = {
-    'ethereum': 'https://api.etherscan.io/api',
-    'eth':      'https://api.etherscan.io/api',
-    'base':     'https://api.basescan.org/api',
-    'polygon':  'https://api.polygonscan.com/api',
-    'matic':    'https://api.polygonscan.com/api',
+ETHERSCAN_CHAIN_IDS = {
+    'ethereum': '1',
+    'eth':      '1',
+    'base':     '8453',
+    'polygon':  '137',
+    'matic':    '137',
+    'arbitrum': '42161',
+    'optimism': '10',
+    'blast':    '81457',
 }
+ETHERSCAN_V2_URL = 'https://api.etherscan.io/v2/api'
 
 async def fetch_supply(mint: dict) -> int | None:
     """
@@ -881,14 +885,14 @@ async def get_minted_count(mint: dict) -> int | None:
     chain         = (mint.get('chain') or 'Ethereum').lower()
     etherscan_key = os.environ.get('ETHERSCAN_API_KEY', '')
 
-    # ── 1. Etherscan: call totalSupply() on the contract ──
+    # ── 1. Etherscan V2: call totalSupply() on the contract ──
     if contract and etherscan_key:
-        base_url = ETHERSCAN_URLS.get(chain)
-        if base_url:
+        chain_id = ETHERSCAN_CHAIN_IDS.get(chain)
+        if chain_id:
             try:
-                # totalSupply() function selector = 0x18160ddd
                 url = (
-                    f"{base_url}?module=proxy&action=eth_call"
+                    f"{ETHERSCAN_V2_URL}?chainid={chain_id}"
+                    f"&module=proxy&action=eth_call"
                     f"&to={contract}&data=0x18160ddd&tag=latest"
                     f"&apikey={etherscan_key}"
                 )
@@ -966,5 +970,5 @@ async def fetch_contract_address(mint: dict) -> str | None:
         # Fallback to top-level contract field
         return data.get('contract') or data.get('contract_address') or None
     except Exception as e:
-        logger.debug(f"[contract] fetch error for {slug}: {e}")
+        logger.warning(f"[contract] fetch error for {slug}: {e}")
     return None
