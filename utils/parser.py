@@ -824,7 +824,9 @@ ETHERSCAN_URLS = {
 
 async def fetch_supply(mint: dict) -> int | None:
     """
-    Fetch max supply from OpenSea collections API.
+    Fetch MAX supply (edition size) from OpenSea drops API.
+    NOTE: OpenSea collections API 'total_supply' = items minted so far (NOT max supply).
+          The correct max supply field is in the drops API as 'supply' or 'max_supply'.
     Returns int or None.
     """
     mint_link = (mint.get('os_link') or mint.get('mint_link') or '').strip()
@@ -835,25 +837,27 @@ async def fetch_supply(mint: dict) -> int | None:
     if not api_key:
         return None
     hdrs = {'x-api-key': api_key, 'Accept': 'application/json'}
+
+    # ── Try drops API first — has the correct max supply ──
     try:
         data = await _get(
-            f"https://api.opensea.io/api/v2/collections/{slug}",
+            f"https://api.opensea.io/api/v2/drops/{slug}",
             headers=hdrs, as_json=True, timeout=8
         )
-        if not data:
-            return None
-        # total_supply on OpenSea collections = max supply for drops
-        supply = (
-            data.get('total_supply') or
-            data.get('max_supply') or
-            (data.get('stats') or {}).get('total_supply') or
-            0
-        )
-        if supply and int(supply) > 0:
-            logger.info(f"[supply] {mint.get('name')}: {supply} via OpenSea")
-            return int(supply)
+        if data:
+            supply = int(
+                data.get('supply') or
+                data.get('max_supply') or
+                data.get('total_supply') or
+                (data.get('drop') or {}).get('supply') or
+                (data.get('drop') or {}).get('max_supply') or 0
+            )
+            if supply > 0:
+                logger.info(f"[supply] {mint.get('name')}: {supply:,} via OpenSea drops")
+                return supply
     except Exception as e:
-        logger.debug(f"[supply] fetch error for {slug}: {e}")
+        logger.debug(f"[supply] drops API error for {slug}: {e}")
+
     return None
 
 
@@ -917,18 +921,11 @@ async def get_minted_count(mint: dict) -> int | None:
                 logger.debug(f"[minted] OpenSea drops error for {mint.get('name')}: {e}")
 
             try:
-                # Fallback: collections stats
-                data = await _get(
-                    f"https://api.opensea.io/api/v2/collections/{slug}/stats",
-                    headers=hdrs, as_json=True, timeout=8
-                )
-                if data:
-                    total = int((data.get('total') or {}).get('supply', 0) or 0)
-                    if total > 0:
-                        logger.info(f"[minted] {mint.get('name')}: {total:,} via OpenSea stats")
-                        return total
-            except Exception as e:
-                logger.debug(f"[minted] OpenSea stats error for {mint.get('name')}: {e}")
+                # Fallback: collections stats — 'num_owners' won't help, skip
+                # Only drops API has reliable total_minted
+                pass
+            except Exception:
+                pass
 
     return None
 

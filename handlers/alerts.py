@@ -408,6 +408,13 @@ async def _track_minted(mint: dict):
     if minted is None:
         return
 
+    # ── Guard: if minted > total_supply, the stored supply is wrong ──
+    # This happens when total_supply was accidentally set from minted count
+    if total_supply and minted > total_supply:
+        logger.warning(f"[supply] {mint.get('name')}: minted ({minted:,}) > supply ({total_supply:,}) — supply was wrong, clearing it")
+        update_mint(mint['id'], total_supply=0)
+        total_supply = 0
+
     # ── Step 3: update DB ──
     update_mint(mint['id'], minted=minted)
     logger.info(f"[minted] {mint.get('name')}: {minted:,} / {total_supply:,}")
