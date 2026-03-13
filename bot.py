@@ -8,7 +8,7 @@ from telegram.ext import (
 from config import BOT_TOKEN
 from handlers.admin import (
     start, dashboard, handle_callback, reply_kb,
-    add_mint_start, add_mint_link,
+    add_mint_start, add_mint_link, waiting_supply,
     add_channel_start,
     pb_first_time, pb_first_name, pb_next_interval, pb_next_name, pb_price,
     pb_add_cb, pb_done_cb,
@@ -19,7 +19,7 @@ from handlers.admin import (
     # State constants — single source of truth in admin.py
     WAITING_LINK, WAITING_FIRST_TIME, WAITING_PHASE_NAMES, WAITING_INTERVAL,
     WAITING_PRICES, WAITING_LIMITS, WAITING_EDIT_VALUE, WAITING_CHANNEL,
-    WAITING_CONTRACT, PB_FIRST_NAME, PB_FIRST_TIME, PB_NEXT_INTERVAL,
+    WAITING_SUPPLY, WAITING_CONTRACT, PB_FIRST_NAME, PB_FIRST_TIME, PB_NEXT_INTERVAL,
     PB_NEXT_NAME, PB_PRICE, EDIT_PHASE_VAL,
 )
 from handlers.alerts import setup_scheduler
@@ -47,6 +47,7 @@ def main():
         entry_points=[CallbackQueryHandler(add_mint_start, pattern="^add_mint$")],
         states={
             WAITING_LINK:     [MessageHandler(TEXT, add_mint_link)],
+            WAITING_SUPPLY:   [MessageHandler(TEXT, waiting_supply)],
             PB_FIRST_TIME:    [MessageHandler(TEXT, pb_first_time)],
             PB_FIRST_NAME:    [MessageHandler(TEXT, pb_first_name)],
             PB_NEXT_INTERVAL: [MessageHandler(TEXT, pb_next_interval)],

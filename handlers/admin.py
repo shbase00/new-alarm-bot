@@ -28,6 +28,7 @@ WAITING_PRICES       = 5
 WAITING_LIMITS       = 6
 WAITING_EDIT_VALUE   = 7
 WAITING_CHANNEL      = 8
+WAITING_SUPPLY       = 9   # asking for supply after mint saved
 # Phase builder states
 PB_FIRST_NAME        = 10
 PB_FIRST_TIME        = 11
@@ -787,13 +788,24 @@ async def add_mint_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['pending_mint_ids'] = saved_ids
     ctx.user_data['pending_mint_idx'] = 0
 
-    # Show confirmation summary
+    # Ask for supply before showing summary
     if len(saved_ids) == 1:
-        mint_data = all_data[0]
         mint_id   = saved_ids[0]
+        mint_data = all_data[0]
         ctx.user_data['building_phases_for'] = mint_id
-        await _show_single_summary(update, ctx, mint_data, mint_id)
-        return _decide_next_state(mint_data)
+        ctx.user_data['pending_mint_data']   = mint_data
+
+        minted = mint_data.get('minted', 0)
+        minted_txt = f"\n📊 *Minted so far:* {minted:,}" if minted else ""
+
+        await update.message.reply_text(
+            f"✅ *{mint_data.get('name','Mint')}* detected!\n"
+            f"{minted_txt}\n\n"
+            f"📦 *What's the total supply?*\n"
+            f"Reply with a number (e.g. `5000`) or type `skip` to set later.",
+            parse_mode='Markdown',
+        )
+        return WAITING_SUPPLY
     else:
         # Multi-link: show summary of all, confirm all at once
         msg = f"✅ *Detected {len(saved_ids)} collections*\n\n"
@@ -824,6 +836,32 @@ async def add_mint_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, parse_mode='Markdown',
                                         reply_markup=kb, disable_web_page_preview=True)
         return ConversationHandler.END
+
+
+async def waiting_supply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle supply input after mint is saved."""
+    text     = update.message.text.strip()
+    mint_id  = ctx.user_data.get('building_phases_for')
+    mint_data = ctx.user_data.get('pending_mint_data', {})
+
+    if not mint_id:
+        return ConversationHandler.END
+
+    if text.lower() != 'skip':
+        try:
+            supply = int(text.replace(',', '').replace('.', '').strip())
+            if supply > 0:
+                update_mint(mint_id, total_supply=supply)
+                mint_data['total_supply'] = supply
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Please enter a valid number (e.g. `5000`) or type `skip`.",
+                parse_mode='Markdown',
+            )
+            return WAITING_SUPPLY
+
+    await _show_single_summary(update, ctx, mint_data, mint_id)
+    return _decide_next_state(mint_data)
 
 
 async def _show_single_summary(update, ctx, mint_data: dict, mint_id: int):

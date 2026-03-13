@@ -89,38 +89,42 @@ def _parse_time(raw: str) -> str:
 # ── PHASE PARSERS ─────────────────────────────────────────────
 
 def _parse_li_items(items: list) -> list:
-    KNOWN = ['TEAM','GTD','FCFS','PUBLIC','WHITELIST','HOLDER','OG',
-             'ALLOWLIST','AL','WL','GUARANTEED','FREE CLAIM','PUBLIC STAGE']
+    """Parse li items from OpenSea schedule. Anchors on 'Starts:' keyword."""
     phases = []
     for item in items:
         if not item or not item.strip():
             continue
         text  = item.replace('\xa0', ' ').strip()
-        # Split on pipe AND newline so "0.00 ETH | LIMIT 2 PER WALLET" becomes separate parts
         lines = [l.strip() for l in re.split(r'\n|\s*\|\s*', text) if l.strip()]
         if not lines:
             continue
+
         phase = {'name': 'Phase', 'time': '', 'price': 'Free', 'limit': 'N/A'}
-        first = lines[0]
-        si = first.lower().find('starts:')
-        if si >= 0:
-            phase['name'] = first[:si].strip() or 'Phase'
-            phase['time'] = _parse_time(first[si+7:].strip())
-        else:
-            phase['name'] = first
-        # Normalize known phase names
-        name_up = phase['name'].upper()
-        for k in KNOWN:
-            if k in name_up:
-                phase['name'] = k.title() if k not in ('GTD','FCFS','OG','WL','AL') else k
+
+        # Find 'Starts:' anywhere in lines — it's always present on OpenSea
+        starts_idx = -1
+        for li, line in enumerate(lines):
+            if 'starts:' in line.lower():
+                starts_idx = li
+                # Name = everything before Starts: on the same line
+                si = line.lower().find('starts:')
+                inline_name = line[:si].strip()
+                phase['time'] = _parse_time(line[si+7:].strip())
+                if inline_name:
+                    phase['name'] = inline_name
+                elif li > 0:
+                    # Name is the line before Starts:
+                    phase['name'] = lines[li-1]
                 break
+
+        if starts_idx < 0:
+            continue  # No Starts: found — skip this item entirely
+
+        # Parse remaining lines for price/limit
         price_num = None
-        for line in lines[1:]:
+        for line in lines[starts_idx+1:]:
             ll = line.lower().strip()
-            if ll.startswith('starts:'):
-                phase['time'] = _parse_time(line[7:].strip())
-            elif re.match(r'^[\d.]+\s*(eth|sol|matic|bnb)', ll):
-                # e.g. "0.00 ETH" or "0.005 ETH"
+            if re.match(r'^[\d.]+\s*(eth|sol|matic|bnb)', ll):
                 mp = re.match(r'^([\d.]+)\s*(\w+)', ll)
                 if mp:
                     val = float(mp.group(1))
@@ -131,40 +135,45 @@ def _parse_li_items(items: list) -> list:
                 val = float(price_num) if price_num else 0
                 phase['price'] = 'Free' if val == 0 else f"{price_num} {'SOL' if 'sol' in ll else 'ETH'}"
                 price_num = None
-            elif 'free' in ll and 'free' not in phase['price'].lower():
+            elif 'free' in ll:
                 phase['price'] = 'Free'
             else:
                 mm = re.search(r'limit\s+(\d+)\s+per', line, re.IGNORECASE)
                 if mm: phase['limit'] = mm.group(1)
-        if phase['time']:  # only add phases where we detected a time
+
+        if phase['time']:
             phases.append(phase)
     return phases
 
 
 def _parse_page_text(text: str) -> list:
+    """Parse page text for mint schedule. Anchors on 'Starts:' keyword."""
     if not text:
         return []
 
     # Narrow to mint schedule section if present
+    section_start = -1
     for marker in ['Mint schedule', 'MINT SCHEDULE', 'Mint Schedule']:
         idx = text.find(marker)
         if idx >= 0:
             text = text[idx:idx+4000]
+            section_start = idx
             break
+
+    # If no schedule section found, don't parse full page (too noisy)
+    if section_start < 0:
+        return []
 
     lines  = [l.strip() for l in text.split('\n') if l.strip()]
     phases = []
 
-    KNOWN_PHASES = {'GTD','FCFS','OG','WL','AL','PUBLIC','TEAM','ALLOWLIST',
-                    'WHITELIST','PRESALE','FREE MINT','HOLDER','COMMUNITY'}
-
     for i, line in enumerate(lines):
-        # Pattern 1: "GTDStarts: March 13..." or "GTD\nStarts: ..."
+        # Anchor: any line containing "Starts:"
         m = re.search(r'(.+?)Starts:\s*(.*)', line, re.IGNORECASE)
         if m:
             name_raw = m.group(1).strip()
             time_raw = m.group(2).strip()
-            # If name is empty, look backwards for a phase name
+            # If name not on same line, look at previous line
             if not name_raw and i > 0:
                 name_raw = lines[i-1]
             phase = {
@@ -177,7 +186,7 @@ def _parse_page_text(text: str) -> list:
             for j in range(i+1, min(i+10, len(lines))):
                 l  = lines[j]
                 ll = l.lower()
-                if re.search(r'starts:', ll): break
+                if re.search(r'starts:', ll): break  # next phase
                 if re.match(r'^[\d.]+\s*(eth|sol|matic)', ll):
                     mp = re.match(r'^([\d.]+)\s*(\w+)', ll)
                     if mp:
@@ -194,45 +203,7 @@ def _parse_page_text(text: str) -> list:
                 else:
                     mm = re.search(r'limit\s+(\d+)\s+per', l, re.IGNORECASE)
                     if mm: phase['limit'] = mm.group(1)
-            phases.append(phase)
-            continue
-
-        # Pattern 2: standalone phase name line followed by date on next line
-        # e.g. "GTD" then next line "March 13, 2026 at 3:00 PM"
-        line_up = line.upper().strip()
-        is_phase_name = (
-            line_up in KNOWN_PHASES or
-            re.match(r'^(PHASE|STAGE|ROUND)\s*\d*$', line_up) or
-            (len(line) < 30 and re.match(r'^[A-Z][A-Z0-9 ]+$', line_up))
-        )
-        if is_phase_name and i + 1 < len(lines):
-            next_line = lines[i+1]
-            # Check if next line looks like a date/time
-            has_time = bool(re.search(
-                r'(\d{1,2}:\d{2}|[A-Za-z]+ \d{1,2}|started|ended|live)',
-                next_line, re.IGNORECASE
-            ))
-            if has_time:
-                phase = {
-                    'name':  line,
-                    'time':  _parse_time(next_line),
-                    'price': 'Free',
-                    'limit': 'N/A',
-                }
-                # Look ahead for price
-                for j in range(i+2, min(i+8, len(lines))):
-                    l  = lines[j]
-                    ll = l.lower()
-                    if re.search(r'starts:|started:', ll): break
-                    if l_up := l.upper().strip():
-                        if l_up in KNOWN_PHASES: break
-                    if re.match(r'^[\d.]+\s*(eth|sol|matic)', ll):
-                        mp = re.match(r'^([\d.]+)\s*(\w+)', ll)
-                        if mp:
-                            val = float(mp.group(1))
-                            phase['price'] = 'Free' if val == 0 else f"{mp.group(1)} {mp.group(2).upper()}"
-                    elif 'free' in ll:
-                        phase['price'] = 'Free'
+            if phase['time']:
                 phases.append(phase)
 
     return phases
@@ -243,7 +214,7 @@ def _parse_page_text(text: str) -> list:
 async def _scrape(url: str) -> dict:
     result = {
         'name': '', 'chain': 'Ethereum', 'phases': [],
-        'total_supply': 0, 'minted': 0, 'twitter': '', 'discord': '',
+        'minted': 0, 'twitter': '', 'discord': '',
         'success': False, 'error': None,
     }
     try:
@@ -361,13 +332,12 @@ async def _scrape(url: str) -> dict:
                     }
                 }
 
-                // Method 2: any li with Starts/ETH keywords
+                // Method 2: any li that contains "Starts:" — strong signal it's a schedule item
                 if (items.length === 0) {
                     var allLi = body.querySelectorAll('li');
                     for (var k = 0; k < allLi.length; k++) {
                         var txt = (allLi[k].innerText || '').trim();
-                        if (txt && (txt.indexOf('Starts') >= 0 || txt.indexOf('ETH') >= 0 ||
-                            txt.indexOf('Free') >= 0 || txt.indexOf('MINTING') >= 0)) {
+                        if (txt && txt.indexOf('Starts:') >= 0) {
                             items.push(txt);
                         }
                     }
@@ -377,36 +347,16 @@ async def _scrape(url: str) -> dict:
                 var links = [];
                 body.querySelectorAll('a[href]').forEach(function(a) { links.push(a.href); });
 
-                // ── Supply extraction from DOM ──
-                var supplyText = '';
-                // Look for "Items minted X / Y" pattern anywhere in page
-                var allText = body.innerText || '';
-                var supplyPatterns = [
-                    /Items? minted ([\d,]+) \/ ([\d,]+)/i,
-                    /([\d,]+) \/ ([\d,]+) [Ii]tems?/,
-                ];
-                for (var sp = 0; sp < supplyPatterns.length; sp++) {
-                    var sm = allText.match(supplyPatterns[sp]);
-                    if (sm) { supplyText = sm[0]; break; }
-                }
-                // Also try specific elements that show supply
-                if (!supplyText) {
-                    var supplyEls = body.querySelectorAll('[class*="supply"],[class*="Supply"],[class*="items"],[class*="minted"]');
-                    for (var se = 0; se < supplyEls.length; se++) {
-                        var st = (supplyEls[se].innerText || '').trim();
-                        if (st && st.match(/[\d,]+\s*\/\s*[\d,]+/)) { supplyText = st; break; }
-                    }
-                }
-
-                return {text: pageText, items: items, links: links, supplyText: supplyText};
+                return {text: pageText, items: items, links: links};
             }""")
 
             page_text     = extracted.get('text', '')
             schedule_data = extracted.get('items', [])
             links         = extracted.get('links', [])
-            supply_text   = extracted.get('supplyText', '') or ''
 
             await browser.close()
+
+            logger.info(f"[debug] schedule_data items ({len(schedule_data)}): {schedule_data[:5]}")
 
             # ── Collection name ──
             for line in page_text.split('\n')[:5]:
@@ -415,39 +365,6 @@ async def _scrape(url: str) -> dict:
                     if not any(x in line.lower() for x in ['opensea','collection','http','www']):
                         result['name'] = line
                         break
-
-            # ── Supply + minted ──
-            # First try the targeted supply_text from JS (most reliable)
-            # Then fall back to full page_text scan
-            for text_to_scan in [supply_text, page_text]:
-                if not text_to_scan:
-                    continue
-                supply_patterns = [
-                    (r'[Ii]tems?\s+minted\s+([\d,]+)\s*/\s*([\d,]+)', 'both'),
-                    (r'([\d,]+)\s*/\s*([\d,]+)\s+[Ii]tems?',           'both'),
-                    (r'([\d,]+)\s*/\s*([\d,]+)',                        'both'),
-                    (r'[Ss]upply[:\s]+([\d,]+)',                        'supply'),
-                ]
-                for pat, kind in supply_patterns:
-                    sm = re.search(pat, text_to_scan)
-                    if sm:
-                        if kind == 'both':
-                            minted_val  = int(sm.group(1).replace(',', ''))
-                            supply_val  = int(sm.group(2).replace(',', ''))
-                            # Sanity check: supply must be >= minted
-                            if supply_val >= minted_val and supply_val > 0:
-                                result['minted']       = minted_val
-                                result['total_supply'] = supply_val
-                                logger.info(f"Supply detected: {minted_val}/{supply_val}")
-                                break
-                        else:
-                            supply_val = int(sm.group(1).replace(',', ''))
-                            if supply_val > 0:
-                                result['total_supply'] = supply_val
-                                logger.info(f"Supply detected: {supply_val}")
-                                break
-                if result['total_supply'] > 0:
-                    break
 
             # ── Social links ──
             for link in links:
