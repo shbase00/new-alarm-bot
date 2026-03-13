@@ -435,9 +435,73 @@ async def _run_with_timeout(coro, timeout: float, name: str):
         logger.warning(f"[parallel] {name} error: {e}")
         return {}
 
+async def _detect_via_pc_scraper(url: str) -> dict | None:
+    """Call the PC scraper server if PC_SCRAPER_URL is configured."""
+    import os, aiohttp
+    pc_url = os.environ.get('PC_SCRAPER_URL', '').rstrip('/')
+    if not pc_url:
+        return None
+    api_key = os.environ.get('API_SECRET_KEY', '')
+    try:
+        headers = {'Content-Type': 'application/json'}
+        if api_key:
+            headers['X-API-Key'] = api_key
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{pc_url}/scrape",
+                json={'url': url},
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=70),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get('phases'):
+                        logger.info(f"[pc_scraper] Got {len(data['phases'])} phases from PC")
+                        return data
+                    logger.info(f"[pc_scraper] PC returned no phases")
+                else:
+                    logger.warning(f"[pc_scraper] PC server returned {resp.status}")
+    except Exception as e:
+        logger.warning(f"[pc_scraper] PC server unreachable: {e}")
+    return None
+
+
 async def detect_opensea_parallel(url: str, slug: str) -> dict:
     logger.info(f"[parallel] Starting for slug={slug}")
     t0 = datetime.utcnow()
+
+    # If PC scraper is configured, try it first — avoids Railway 403 blocks
+    import os as _os
+    if _os.environ.get('PC_SCRAPER_URL'):
+        logger.info(f"[parallel] Trying PC scraper first...")
+        pc_r = await _detect_via_pc_scraper(url)
+        if pc_r and pc_r.get('phases'):
+            elapsed = (datetime.utcnow() - t0).total_seconds()
+            logger.info(f"[parallel] PC scraper succeeded in {elapsed:.1f}s")
+            col_r = await _run_with_timeout(_detect_via_collections_api(slug), 10, "collections_api")
+            result = {
+                'name':               pc_r.get('name', ''),
+                'chain':              'Ethereum',
+                'contract':           '',
+                'x_link':             pc_r.get('twitter', ''),
+                'discord_link':       pc_r.get('discord', ''),
+                'total_supply':       pc_r.get('total_supply', 0),
+                'phases':             pc_r['phases'],
+                'success':            True,
+                'needs_manual':       False,
+                'countdown_detected': False,
+            }
+            if col_r:
+                if col_r.get('name'):         result['name']         = col_r['name']
+                if col_r.get('chain'):        result['chain']        = col_r['chain']
+                if col_r.get('contract'):     result['contract']     = col_r['contract']
+                if col_r.get('x_link'):       result['x_link']       = col_r['x_link']
+                if col_r.get('discord_link'): result['discord_link'] = col_r['discord_link']
+                if col_r.get('total_supply'): result['total_supply'] = col_r['total_supply']
+            if not result['name']:
+                result['name'] = slug.replace('-', ' ').title()
+            return result
+        logger.info(f"[parallel] PC scraper failed/offline — falling back to Railway scrapers")
 
     col_r, drops_r, pw_r, cd_r = await asyncio.gather(
         _run_with_timeout(_detect_via_collections_api(slug), 10, "collections_api"),
