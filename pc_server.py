@@ -90,13 +90,14 @@ def _parse_time(raw: str) -> str:
 
 def _parse_li_items(items: list) -> list:
     KNOWN = ['TEAM','GTD','FCFS','PUBLIC','WHITELIST','HOLDER','OG',
-             'ALLOWLIST','AL','WL','GUARANTEED','FREE CLAIM']
+             'ALLOWLIST','AL','WL','GUARANTEED','FREE CLAIM','PUBLIC STAGE']
     phases = []
     for item in items:
         if not item or not item.strip():
             continue
         text  = item.replace('\xa0', ' ').strip()
-        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        # Split on pipe AND newline so "0.00 ETH | LIMIT 2 PER WALLET" becomes separate parts
+        lines = [l.strip() for l in re.split(r'\n|\s*\|\s*', text) if l.strip()]
         if not lines:
             continue
         phase = {'name': 'Phase', 'time': '', 'price': 'Free', 'limit': 'N/A'}
@@ -107,6 +108,7 @@ def _parse_li_items(items: list) -> list:
             phase['time'] = _parse_time(first[si+7:].strip())
         else:
             phase['name'] = first
+        # Normalize known phase names
         name_up = phase['name'].upper()
         for k in KNOWN:
             if k in name_up:
@@ -114,10 +116,11 @@ def _parse_li_items(items: list) -> list:
                 break
         price_num = None
         for line in lines[1:]:
-            ll = line.lower()
+            ll = line.lower().strip()
             if ll.startswith('starts:'):
                 phase['time'] = _parse_time(line[7:].strip())
             elif re.match(r'^[\d.]+\s*(eth|sol|matic|bnb)', ll):
+                # e.g. "0.00 ETH" or "0.005 ETH"
                 mp = re.match(r'^([\d.]+)\s*(\w+)', ll)
                 if mp:
                     val = float(mp.group(1))
@@ -128,36 +131,50 @@ def _parse_li_items(items: list) -> list:
                 val = float(price_num) if price_num else 0
                 phase['price'] = 'Free' if val == 0 else f"{price_num} {'SOL' if 'sol' in ll else 'ETH'}"
                 price_num = None
-            elif 'free' in ll:
+            elif 'free' in ll and 'free' not in phase['price'].lower():
                 phase['price'] = 'Free'
             else:
                 mm = re.search(r'limit\s+(\d+)\s+per', line, re.IGNORECASE)
                 if mm: phase['limit'] = mm.group(1)
-        phases.append(phase)
+        if phase['time']:  # only add phases where we detected a time
+            phases.append(phase)
     return phases
 
 
 def _parse_page_text(text: str) -> list:
     if not text:
         return []
+
+    # Narrow to mint schedule section if present
     for marker in ['Mint schedule', 'MINT SCHEDULE', 'Mint Schedule']:
         idx = text.find(marker)
         if idx >= 0:
-            text = text[idx:idx+3000]
+            text = text[idx:idx+4000]
             break
+
     lines  = [l.strip() for l in text.split('\n') if l.strip()]
     phases = []
+
+    KNOWN_PHASES = {'GTD','FCFS','OG','WL','AL','PUBLIC','TEAM','ALLOWLIST',
+                    'WHITELIST','PRESALE','FREE MINT','HOLDER','COMMUNITY'}
+
     for i, line in enumerate(lines):
+        # Pattern 1: "GTDStarts: March 13..." or "GTD\nStarts: ..."
         m = re.search(r'(.+?)Starts:\s*(.*)', line, re.IGNORECASE)
         if m:
+            name_raw = m.group(1).strip()
+            time_raw = m.group(2).strip()
+            # If name is empty, look backwards for a phase name
+            if not name_raw and i > 0:
+                name_raw = lines[i-1]
             phase = {
-                'name':  m.group(1).strip() or 'Phase',
-                'time':  _parse_time(m.group(2).strip()),
+                'name':  name_raw or 'Phase',
+                'time':  _parse_time(time_raw),
                 'price': 'Free',
                 'limit': 'N/A',
             }
             price_num = None
-            for j in range(i+1, min(i+8, len(lines))):
+            for j in range(i+1, min(i+10, len(lines))):
                 l  = lines[j]
                 ll = l.lower()
                 if re.search(r'starts:', ll): break
@@ -166,15 +183,58 @@ def _parse_page_text(text: str) -> list:
                     if mp:
                         val = float(mp.group(1))
                         phase['price'] = 'Free' if val == 0 else f"{mp.group(1)} {mp.group(2).upper()}"
-                elif re.match(r'^[\d.]+$', l): price_num = l
+                elif re.match(r'^[\d.]+$', l.strip()):
+                    price_num = l.strip()
                 elif ('eth' in ll or 'sol' in ll) and price_num is not None:
                     val = float(price_num) if price_num else 0
                     phase['price'] = 'Free' if val == 0 else f"{price_num} {'SOL' if 'sol' in ll else 'ETH'}"
                     price_num = None
+                elif 'free' in ll:
+                    phase['price'] = 'Free'
                 else:
                     mm = re.search(r'limit\s+(\d+)\s+per', l, re.IGNORECASE)
                     if mm: phase['limit'] = mm.group(1)
             phases.append(phase)
+            continue
+
+        # Pattern 2: standalone phase name line followed by date on next line
+        # e.g. "GTD" then next line "March 13, 2026 at 3:00 PM"
+        line_up = line.upper().strip()
+        is_phase_name = (
+            line_up in KNOWN_PHASES or
+            re.match(r'^(PHASE|STAGE|ROUND)\s*\d*$', line_up) or
+            (len(line) < 30 and re.match(r'^[A-Z][A-Z0-9 ]+$', line_up))
+        )
+        if is_phase_name and i + 1 < len(lines):
+            next_line = lines[i+1]
+            # Check if next line looks like a date/time
+            has_time = bool(re.search(
+                r'(\d{1,2}:\d{2}|[A-Za-z]+ \d{1,2}|started|ended|live)',
+                next_line, re.IGNORECASE
+            ))
+            if has_time:
+                phase = {
+                    'name':  line,
+                    'time':  _parse_time(next_line),
+                    'price': 'Free',
+                    'limit': 'N/A',
+                }
+                # Look ahead for price
+                for j in range(i+2, min(i+8, len(lines))):
+                    l  = lines[j]
+                    ll = l.lower()
+                    if re.search(r'starts:|started:', ll): break
+                    if l_up := l.upper().strip():
+                        if l_up in KNOWN_PHASES: break
+                    if re.match(r'^[\d.]+\s*(eth|sol|matic)', ll):
+                        mp = re.match(r'^([\d.]+)\s*(\w+)', ll)
+                        if mp:
+                            val = float(mp.group(1))
+                            phase['price'] = 'Free' if val == 0 else f"{mp.group(1)} {mp.group(2).upper()}"
+                    elif 'free' in ll:
+                        phase['price'] = 'Free'
+                phases.append(phase)
+
     return phases
 
 
@@ -225,67 +285,103 @@ async def _scrape(url: str) -> dict:
             except Exception:
                 pass
 
-            # Wait for schedule section
-            for selector in [
-                'text=Mint schedule','text=Mint Schedule','ol li',
-                'text=Starts:','text=TEAM','text=GTD','text=FCFS',
-                'text=Public stage','text=Whitelist',
-            ]:
+            # Wait for schedule section — try many patterns, stop at first hit
+            schedule_selectors = [
+                'text=Mint schedule', 'text=Mint Schedule', 'text=MINT SCHEDULE',
+                'text=Starts:', 'text=Started:', 'text=MINTING NOW',
+                'text=GTD', 'text=FCFS', 'text=OG', 'text=WL',
+                'text=Allowlist', 'text=Public', 'text=Whitelist',
+                'text=Phase', 'text=Stage',
+                'ol li', '[data-testid*="phase"]', '[data-testid*="stage"]',
+                '[class*="MintSchedule"]', '[class*="mint-schedule"]',
+                '[class*="phase"]', '[class*="stage"]',
+            ]
+            found_selector = None
+            for selector in schedule_selectors:
                 try:
-                    await page.wait_for_selector(selector, timeout=8000)
+                    await page.wait_for_selector(selector, timeout=5000)
+                    found_selector = selector
                     logger.info(f"Schedule found via: {selector}")
                     break
                 except PWTimeout:
                     continue
 
-            # Wait for JS-rendered times
+            # Wait for JS-rendered times — shorter timeout per month
+            time_loaded = False
             for month in ['January','February','March','April','May','June',
                           'July','August','September','October','November','December']:
                 try:
-                    await page.wait_for_selector(f'text={month}', timeout=5000)
+                    await page.wait_for_selector(f'text={month}', timeout=3000)
                     logger.info(f"Times loaded (month: {month})")
+                    time_loaded = True
                     break
                 except PWTimeout:
                     continue
-            else:
-                await page.wait_for_timeout(3000)
+            if not time_loaded:
+                await page.wait_for_timeout(2000)
 
             page_text = await page.evaluate(
                 "function(){ return document.body ? document.body.innerText : ''; }"
             )
 
-            # Structured li extraction
+            # Structured extraction — try li items AND div-based layout
             schedule_data = await page.evaluate("""function() {
                 var results = [];
-                var headers = document.querySelectorAll('*');
+
+                // ── Method 1: find "Mint schedule" header then grab ol/li ──
+                var allEls = document.querySelectorAll('*');
                 var scheduleEl = null;
-                for (var i = 0; i < headers.length; i++) {
-                    var t = (headers[i].textContent || '').trim();
-                    if (t === 'Mint schedule' || t === 'MINT SCHEDULE') {
-                        scheduleEl = headers[i]; break;
+                for (var i = 0; i < allEls.length; i++) {
+                    var t = (allEls[i].textContent || '').trim();
+                    if (t === 'Mint schedule' || t === 'Mint Schedule' || t === 'MINT SCHEDULE') {
+                        scheduleEl = allEls[i]; break;
                     }
                 }
                 if (scheduleEl) {
                     var parent = scheduleEl.parentElement;
-                    for (var up = 0; up < 5; up++) {
+                    for (var up = 0; up < 8; up++) {
                         if (!parent) break;
                         var ol = parent.querySelector('ol');
                         if (ol) {
                             var items = ol.querySelectorAll('li');
-                            for (var j = 0; j < items.length; j++)
-                                results.push(items[j].innerText || items[j].textContent || '');
-                            break;
+                            for (var j = 0; j < items.length; j++) {
+                                var txt = (items[j].innerText || items[j].textContent || '').trim();
+                                if (txt) results.push(txt);
+                            }
+                            if (results.length > 0) return results;
                         }
+                        // Also try direct children divs (new OpenSea layout)
+                        var divs = parent.querySelectorAll('div > div');
+                        for (var d = 0; d < divs.length; d++) {
+                            var dtxt = (divs[d].innerText || '').trim();
+                            if (dtxt && (dtxt.indexOf('Starts') >= 0 || dtxt.indexOf('ETH') >= 0 ||
+                                dtxt.indexOf('Free') >= 0 || dtxt.indexOf('GTD') >= 0 ||
+                                dtxt.indexOf('FCFS') >= 0 || dtxt.indexOf('Public') >= 0 ||
+                                dtxt.indexOf('Allowlist') >= 0)) {
+                                results.push(dtxt);
+                            }
+                        }
+                        if (results.length > 0) return results;
                         parent = parent.parentElement;
                     }
                 }
-                if (results.length === 0) {
-                    var allLi = document.querySelectorAll('li');
-                    for (var k = 0; k < allLi.length; k++) {
-                        var txt = allLi[k].innerText || '';
-                        if (txt.indexOf('Starts:') >= 0 || txt.indexOf('ETH') >= 0)
-                            results.push(txt);
+
+                // ── Method 2: any li with Starts/ETH/phase keywords ──
+                var allLi = document.querySelectorAll('li');
+                for (var k = 0; k < allLi.length; k++) {
+                    var txt = (allLi[k].innerText || '').trim();
+                    if (txt && (txt.indexOf('Starts') >= 0 || txt.indexOf('ETH') >= 0 ||
+                        txt.indexOf('Free') >= 0 || txt.indexOf('MINTING') >= 0)) {
+                        results.push(txt);
                     }
+                }
+                if (results.length > 0) return results;
+
+                // ── Method 3: data-testid based selectors ──
+                var phases = document.querySelectorAll('[data-testid*="phase"],[data-testid*="stage"],[data-testid*="mint"]');
+                for (var p = 0; p < phases.length; p++) {
+                    var txt = (phases[p].innerText || '').trim();
+                    if (txt) results.push(txt);
                 }
                 return results;
             }""")
