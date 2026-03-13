@@ -442,6 +442,13 @@ async def _detect_via_pc_scraper(url: str) -> dict | None:
     if not pc_url:
         return None
     api_key = os.environ.get('API_SECRET_KEY', '')
+
+    # Always scrape the /overview page for OpenSea collections — it has the drop schedule
+    scrape_url = url
+    if 'opensea.io/collection/' in url:
+        slug = _opensea_slug(url)
+        if slug:
+            scrape_url = f"https://opensea.io/collection/{slug}/overview"
     try:
         headers = {'Content-Type': 'application/json'}
         if api_key:
@@ -449,7 +456,7 @@ async def _detect_via_pc_scraper(url: str) -> dict | None:
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{pc_url}/scrape",
-                json={'url': url},
+                json={'url': scrape_url},
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=120),
             ) as resp:

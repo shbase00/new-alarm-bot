@@ -358,13 +358,17 @@ async def _scrape(url: str) -> dict:
 
             logger.info(f"[debug] schedule_data items ({len(schedule_data)}): {schedule_data[:5]}")
 
-            # ── Collection name ──
-            for line in page_text.split('\n')[:5]:
-                line = line.strip()
-                if line and 2 < len(line) < 60:
-                    if not any(x in line.lower() for x in ['opensea','collection','http','www']):
-                        result['name'] = line
-                        break
+            # ── Collection name — use h1 captured earlier, fallback to page title ──
+            if not result['name']:
+                # Try first non-nav line from page text
+                nav_words = {'discover','collections','tokens','swap','drops',
+                             'activity','rewards','studio','opensea'}
+                for line in page_text.split('\n')[:10]:
+                    line = line.strip()
+                    if line and 2 < len(line) < 80:
+                        if line.lower() not in nav_words and 'opensea' not in line.lower():
+                            result['name'] = line
+                            break
 
             # ── Social links ──
             for link in links:
@@ -379,10 +383,11 @@ async def _scrape(url: str) -> dict:
                 phases = _parse_page_text(page_text)
 
             # ── Live mint fallback ──
+            # Only trigger on strong button-level signals — "minting" alone appears on all collection pages
             if not phases:
                 now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-                live_indicators = ['mint now', 'minting now', 'mint is live', 'minting', 'claim now']
-                if any(ind in page_text.lower() for ind in live_indicators):
+                strong_indicators = ['mint now', 'minting now', 'mint is live', 'claim now']
+                if any(ind in page_text.lower() for ind in strong_indicators):
                     price = 'Free'
                     price_m = re.search(r'([\d.]+)\s*(ETH|eth|Sol|sol|MATIC|matic)', page_text)
                     if price_m:
@@ -397,7 +402,9 @@ async def _scrape(url: str) -> dict:
                 logger.info(f"Done: {result['name'] or url} — {len(phases)} phase(s)")
             else:
                 result['error'] = 'no_phases_found'
-                logger.warning(f"No phases found for: {url}")
+                # Log snippet to help debug what the page actually contained
+                snippet = ' | '.join(page_text.split('\n')[:8]) if page_text else 'empty'
+                logger.warning(f"No phases found. Page start: {snippet[:300]}")
 
     except Exception as e:
         result['error'] = str(e)

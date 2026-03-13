@@ -404,8 +404,12 @@ async def _track_minted(mint: dict):
             logger.debug(f"[supply] error for {mint.get('name')}: {e}")
 
     # ── Step 2: get current minted count from Etherscan ──
+    contract = (mint.get('contract') or '').strip()
+    if not contract:
+        logger.info(f"[minted] {mint.get('name')}: no contract address — skipping Etherscan, trying OpenSea drops API")
     minted = await get_minted_count(mint)
     if minted is None:
+        logger.info(f"[minted] {mint.get('name')}: could not get minted count (no contract + OpenSea returned nothing)")
         return
 
     # ── Guard: if minted > total_supply, the stored supply is wrong ──

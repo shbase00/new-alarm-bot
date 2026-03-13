@@ -840,8 +840,8 @@ async def add_mint_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def waiting_supply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Handle supply input after mint is saved."""
-    text     = update.message.text.strip()
-    mint_id  = ctx.user_data.get('building_phases_for')
+    text      = update.message.text.strip()
+    mint_id   = ctx.user_data.get('building_phases_for')
     mint_data = ctx.user_data.get('pending_mint_data', {})
 
     if not mint_id:
@@ -859,6 +859,20 @@ async def waiting_supply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown',
             )
             return WAITING_SUPPLY
+
+    # Trigger immediate minted count check after supply is set
+    if mint_data.get('total_supply'):
+        try:
+            from utils.parser import get_minted_count
+            from database import get_mint as db_get_mint
+            fresh_mint = db_get_mint(mint_id) or mint_data
+            minted = await get_minted_count(fresh_mint)
+            if minted and minted > 0:
+                update_mint(mint_id, minted=minted)
+                mint_data['minted'] = minted
+                logger.info(f"[supply] Immediate minted check: {minted:,}/{mint_data['total_supply']:,}")
+        except Exception as e:
+            logger.debug(f"[supply] Immediate minted check error: {e}")
 
     await _show_single_summary(update, ctx, mint_data, mint_id)
     return _decide_next_state(mint_data)
