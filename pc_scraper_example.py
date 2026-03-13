@@ -15,8 +15,8 @@ import json
 from datetime import datetime, timedelta
 
 # ── CONFIG ──────────────────────────────────────────────────
-BOT_API_URL = "https://your-bot.railway.app"   # Your Railway URL
-API_SECRET_KEY = ""                             # Must match API_SECRET_KEY in Railway env
+BOT_API_URL = "https://mint-alarm-production.up.railway.app"
+API_SECRET_KEY = "9fA7K2xQ4Lm8TzR6Wb1H"
 
 
 # ── SEND MINT TO BOT ─────────────────────────────────────────
