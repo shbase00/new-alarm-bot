@@ -451,7 +451,7 @@ async def _detect_via_pc_scraper(url: str) -> dict | None:
                 f"{pc_url}/scrape",
                 json={'url': url},
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=70),
+                timeout=aiohttp.ClientTimeout(total=120),
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()

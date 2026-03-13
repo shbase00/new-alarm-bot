@@ -243,7 +243,7 @@ def _parse_page_text(text: str) -> list:
 async def _scrape(url: str) -> dict:
     result = {
         'name': '', 'chain': 'Ethereum', 'phases': [],
-        'total_supply': 0, 'twitter': '', 'discord': '',
+        'total_supply': 0, 'minted': 0, 'twitter': '', 'discord': '',
         'success': False, 'error': None,
     }
     try:
@@ -271,65 +271,72 @@ async def _scrape(url: str) -> dict:
                 locale='en-US',
             )
             page = await context.new_page()
+            # Block heavy resources for speed
             await page.route(
-                "**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,mp4,mp3}",
+                "**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,mp4,mp3,ico}",
                 lambda r: r.abort()
             )
-            await page.goto(url, wait_until='domcontentloaded', timeout=60000)
+            await page.goto(url, wait_until='domcontentloaded', timeout=30000)
 
-            # Collection name
+            # Wait for h1 first (collection name)
             try:
-                el = await page.wait_for_selector('h1', timeout=8000)
+                el = await page.wait_for_selector('h1', timeout=6000)
                 if el:
                     result['name'] = ' '.join((await el.inner_text()).strip().split())
             except Exception:
                 pass
 
-            # Wait for schedule section — try many patterns, stop at first hit
-            schedule_selectors = [
-                'text=Mint schedule', 'text=Mint Schedule', 'text=MINT SCHEDULE',
-                'text=Starts:', 'text=Started:', 'text=MINTING NOW',
-                'text=GTD', 'text=FCFS', 'text=OG', 'text=WL',
-                'text=Allowlist', 'text=Public', 'text=Whitelist',
-                'text=Phase', 'text=Stage',
-                'ol li', '[data-testid*="phase"]', '[data-testid*="stage"]',
-                '[class*="MintSchedule"]', '[class*="mint-schedule"]',
-                '[class*="phase"]', '[class*="stage"]',
+            # Wait for schedule — all selectors checked IN PARALLEL, stop at first hit
+            async def _try_selector(sel, timeout_ms):
+                try:
+                    await page.wait_for_selector(sel, timeout=timeout_ms)
+                    return sel
+                except PWTimeout:
+                    return None
+
+            found = None
+            tasks = [
+                _try_selector('text=Starts:', 20000),
+                _try_selector('ol li', 20000),
+                _try_selector('text=Mint schedule', 20000),
+                _try_selector('text=MINTING NOW', 20000),
+                _try_selector('text=GTD', 20000),
+                _try_selector('text=FCFS', 20000),
+                _try_selector('text=OG', 20000),
+                _try_selector('text=Public', 20000),
+                _try_selector('text=Allowlist', 20000),
             ]
-            found_selector = None
-            for selector in schedule_selectors:
-                try:
-                    await page.wait_for_selector(selector, timeout=5000)
-                    found_selector = selector
-                    logger.info(f"Schedule found via: {selector}")
+            results = await asyncio.gather(*tasks)
+            for r in results:
+                if r:
+                    found = r
+                    logger.info(f"Schedule found via: {r}")
                     break
-                except PWTimeout:
-                    continue
 
-            # Wait for JS-rendered times — shorter timeout per month
-            time_loaded = False
-            for month in ['January','February','March','April','May','June',
-                          'July','August','September','October','November','December']:
-                try:
-                    await page.wait_for_selector(f'text={month}', timeout=3000)
-                    logger.info(f"Times loaded (month: {month})")
-                    time_loaded = True
+            # Wait for month name = times rendered (all months in parallel, max 5s)
+            month_tasks = [
+                _try_selector(f'text={m}', 5000)
+                for m in ['January','February','March','April','May','June',
+                          'July','August','September','October','November','December']
+            ]
+            month_results = await asyncio.gather(*month_tasks)
+            for r in month_results:
+                if r:
+                    logger.info(f"Times loaded ({r.replace('text=','')})")
                     break
-                except PWTimeout:
-                    continue
-            if not time_loaded:
-                await page.wait_for_timeout(2000)
 
-            page_text = await page.evaluate(
-                "function(){ return document.body ? document.body.innerText : ''; }"
-            )
+            # ── Extract everything in one JS call ──
+            extracted = await page.evaluate("""function() {
+                var body = document.body;
+                if (!body) return {text: '', items: [], links: []};
 
-            # Structured extraction — try li items AND div-based layout
-            schedule_data = await page.evaluate("""function() {
-                var results = [];
+                var pageText = body.innerText || '';
 
-                // ── Method 1: find "Mint schedule" header then grab ol/li ──
-                var allEls = document.querySelectorAll('*');
+                // ── Find schedule items (li or div blocks) ──
+                var items = [];
+
+                // Method 1: Mint schedule section → ol/li
+                var allEls = body.querySelectorAll('*');
                 var scheduleEl = null;
                 for (var i = 0; i < allEls.length; i++) {
                     var t = (allEls[i].textContent || '').trim();
@@ -343,120 +350,134 @@ async def _scrape(url: str) -> dict:
                         if (!parent) break;
                         var ol = parent.querySelector('ol');
                         if (ol) {
-                            var items = ol.querySelectorAll('li');
-                            for (var j = 0; j < items.length; j++) {
-                                var txt = (items[j].innerText || items[j].textContent || '').trim();
-                                if (txt) results.push(txt);
+                            var lis = ol.querySelectorAll('li');
+                            for (var j = 0; j < lis.length; j++) {
+                                var txt = (lis[j].innerText || '').trim();
+                                if (txt) items.push(txt);
                             }
-                            if (results.length > 0) return results;
+                            if (items.length > 0) break;
                         }
-                        // Also try direct children divs (new OpenSea layout)
-                        var divs = parent.querySelectorAll('div > div');
-                        for (var d = 0; d < divs.length; d++) {
-                            var dtxt = (divs[d].innerText || '').trim();
-                            if (dtxt && (dtxt.indexOf('Starts') >= 0 || dtxt.indexOf('ETH') >= 0 ||
-                                dtxt.indexOf('Free') >= 0 || dtxt.indexOf('GTD') >= 0 ||
-                                dtxt.indexOf('FCFS') >= 0 || dtxt.indexOf('Public') >= 0 ||
-                                dtxt.indexOf('Allowlist') >= 0)) {
-                                results.push(dtxt);
-                            }
-                        }
-                        if (results.length > 0) return results;
                         parent = parent.parentElement;
                     }
                 }
 
-                // ── Method 2: any li with Starts/ETH/phase keywords ──
-                var allLi = document.querySelectorAll('li');
-                for (var k = 0; k < allLi.length; k++) {
-                    var txt = (allLi[k].innerText || '').trim();
-                    if (txt && (txt.indexOf('Starts') >= 0 || txt.indexOf('ETH') >= 0 ||
-                        txt.indexOf('Free') >= 0 || txt.indexOf('MINTING') >= 0)) {
-                        results.push(txt);
+                // Method 2: any li with Starts/ETH keywords
+                if (items.length === 0) {
+                    var allLi = body.querySelectorAll('li');
+                    for (var k = 0; k < allLi.length; k++) {
+                        var txt = (allLi[k].innerText || '').trim();
+                        if (txt && (txt.indexOf('Starts') >= 0 || txt.indexOf('ETH') >= 0 ||
+                            txt.indexOf('Free') >= 0 || txt.indexOf('MINTING') >= 0)) {
+                            items.push(txt);
+                        }
                     }
                 }
-                if (results.length > 0) return results;
 
-                // ── Method 3: data-testid based selectors ──
-                var phases = document.querySelectorAll('[data-testid*="phase"],[data-testid*="stage"],[data-testid*="mint"]');
-                for (var p = 0; p < phases.length; p++) {
-                    var txt = (phases[p].innerText || '').trim();
-                    if (txt) results.push(txt);
+                // ── Social links ──
+                var links = [];
+                body.querySelectorAll('a[href]').forEach(function(a) { links.push(a.href); });
+
+                // ── Supply extraction from DOM ──
+                var supplyText = '';
+                // Look for "Items minted X / Y" pattern anywhere in page
+                var allText = body.innerText || '';
+                var supplyPatterns = [
+                    /Items? minted ([\d,]+) \/ ([\d,]+)/i,
+                    /([\d,]+) \/ ([\d,]+) [Ii]tems?/,
+                ];
+                for (var sp = 0; sp < supplyPatterns.length; sp++) {
+                    var sm = allText.match(supplyPatterns[sp]);
+                    if (sm) { supplyText = sm[0]; break; }
                 }
-                return results;
+                // Also try specific elements that show supply
+                if (!supplyText) {
+                    var supplyEls = body.querySelectorAll('[class*="supply"],[class*="Supply"],[class*="items"],[class*="minted"]');
+                    for (var se = 0; se < supplyEls.length; se++) {
+                        var st = (supplyEls[se].innerText || '').trim();
+                        if (st && st.match(/[\d,]+\s*\/\s*[\d,]+/)) { supplyText = st; break; }
+                    }
+                }
+
+                return {text: pageText, items: items, links: links, supplyText: supplyText};
             }""")
 
-            # Supply — detect "Items minted X / Y" or "X / Y items" or "X items"
-            supply_patterns = [
-                r'[Ii]tems?\s+minted\s+[\d,]+\s*/\s*([\d,]+)',   # Items minted 3,382 / 4,000
-                r'([\d,]+)\s*/\s*([\d,]+)\s+[Ii]tems?',           # 3,382 / 4,000 items
-                r'(\d[\d,]+)\s+(?:items?|supply|total)',            # 4,000 items
-            ]
-            for pat in supply_patterns:
-                sm = re.search(pat, page_text)
-                if sm:
-                    # Last group is always the max supply
-                    raw = sm.group(sm.lastindex).replace(',', '')
-                    val = int(raw)
-                    if val > 0:
-                        result['total_supply'] = val
-                        # Also grab minted count if available (first group in pattern 1)
-                        if sm.lastindex > 1:
-                            try:
-                                minted_raw = sm.group(1).replace(',', '')
-                                result['minted'] = int(minted_raw)
-                            except Exception:
-                                pass
+            page_text     = extracted.get('text', '')
+            schedule_data = extracted.get('items', [])
+            links         = extracted.get('links', [])
+            supply_text   = extracted.get('supplyText', '') or ''
+
+            await browser.close()
+
+            # ── Collection name ──
+            for line in page_text.split('\n')[:5]:
+                line = line.strip()
+                if line and 2 < len(line) < 60:
+                    if not any(x in line.lower() for x in ['opensea','collection','http','www']):
+                        result['name'] = line
                         break
 
-            # Social links
-            links = await page.evaluate("""function(){
-                var hrefs = [];
-                document.querySelectorAll('a[href]').forEach(function(a){ hrefs.push(a.href); });
-                return hrefs;
-            }""")
+            # ── Supply + minted ──
+            # First try the targeted supply_text from JS (most reliable)
+            # Then fall back to full page_text scan
+            for text_to_scan in [supply_text, page_text]:
+                if not text_to_scan:
+                    continue
+                supply_patterns = [
+                    (r'[Ii]tems?\s+minted\s+([\d,]+)\s*/\s*([\d,]+)', 'both'),
+                    (r'([\d,]+)\s*/\s*([\d,]+)\s+[Ii]tems?',           'both'),
+                    (r'([\d,]+)\s*/\s*([\d,]+)',                        'both'),
+                    (r'[Ss]upply[:\s]+([\d,]+)',                        'supply'),
+                ]
+                for pat, kind in supply_patterns:
+                    sm = re.search(pat, text_to_scan)
+                    if sm:
+                        if kind == 'both':
+                            minted_val  = int(sm.group(1).replace(',', ''))
+                            supply_val  = int(sm.group(2).replace(',', ''))
+                            # Sanity check: supply must be >= minted
+                            if supply_val >= minted_val and supply_val > 0:
+                                result['minted']       = minted_val
+                                result['total_supply'] = supply_val
+                                logger.info(f"Supply detected: {minted_val}/{supply_val}")
+                                break
+                        else:
+                            supply_val = int(sm.group(1).replace(',', ''))
+                            if supply_val > 0:
+                                result['total_supply'] = supply_val
+                                logger.info(f"Supply detected: {supply_val}")
+                                break
+                if result['total_supply'] > 0:
+                    break
+
+            # ── Social links ──
             for link in links:
                 if ('twitter.com' in link or 'x.com' in link) and '/status/' not in link:
                     if not result['twitter']: result['twitter'] = link
                 elif 'discord.gg' in link or 'discord.com/invite' in link:
                     if not result['discord']: result['discord'] = link
 
-            await browser.close()
-
+            # ── Parse phases ──
             phases = _parse_li_items(schedule_data) if schedule_data else []
             if not phases:
                 phases = _parse_page_text(page_text)
 
-            # ── Live mint fallback: if no schedule found but mint is live ──
+            # ── Live mint fallback ──
             if not phases:
                 now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-                # Check for live mint indicators in page text
-                live_indicators = [
-                    'mint now', 'minting now', 'mint is live', 'buy now',
-                    'claim now', 'public mint', 'open edition'
-                ]
-                page_lower = page_text.lower()
-                is_live = any(ind in page_lower for ind in live_indicators)
-
-                if is_live:
-                    # Try to extract price from page
+                live_indicators = ['mint now', 'minting now', 'mint is live', 'minting', 'claim now']
+                if any(ind in page_text.lower() for ind in live_indicators):
                     price = 'Free'
                     price_m = re.search(r'([\d.]+)\s*(ETH|eth|Sol|sol|MATIC|matic)', page_text)
                     if price_m:
                         val = float(price_m.group(1))
                         price = 'Free' if val == 0 else f"{price_m.group(1)} {price_m.group(2).upper()}"
-                    phases = [{
-                        'name': 'Public Mint',
-                        'time': now_utc,
-                        'price': price,
-                        'limit': 'N/A',
-                    }]
-                    logger.info(f"Live mint detected for: {url} — using now as start time")
+                    phases = [{'name': 'Public Mint', 'time': now_utc, 'price': price, 'limit': 'N/A'}]
+                    logger.info(f"Live mint detected — using now as start time")
 
             if phases:
                 result['phases']  = phases
                 result['success'] = True
-                logger.info(f"Done: {result['name']} — {len(phases)} phase(s)")
+                logger.info(f"Done: {result['name'] or url} — {len(phases)} phase(s)")
             else:
                 result['error'] = 'no_phases_found'
                 logger.warning(f"No phases found for: {url}")
