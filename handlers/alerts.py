@@ -355,8 +355,10 @@ async def check_floor_and_sweeps():
                         mint = dict(mint)
                         mint['contract'] = contract
                         logger.info(f"[contract] Auto-fetched for {mint.get('name')}: {contract}")
+                    else:
+                        logger.info(f"[contract] Not found for {mint.get('name')} (slug={mint.get('os_link') or mint.get('mint_link')})")
                 except Exception as e:
-                    logger.debug(f"[contract] fetch error for {mint.get('name')}: {e}")
+                    logger.warning(f"[contract] fetch error for {mint.get('name')}: {e}")
 
             try:
                 await _track_minted(mint)

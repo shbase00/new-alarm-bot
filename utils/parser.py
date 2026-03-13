@@ -900,7 +900,7 @@ async def get_minted_count(mint: dict) -> int | None:
                         logger.info(f"[minted] {mint.get('name')}: {count:,} via Etherscan")
                         return count
             except Exception as e:
-                logger.debug(f"[minted] Etherscan error for {mint.get('name')}: {e}")
+                logger.warning(f"[minted] Etherscan error for {mint.get('name')}: {e}")
 
     # ── 2. OpenSea collections stats fallback ──
     mint_link = (mint.get('os_link') or mint.get('mint_link') or '').strip()
