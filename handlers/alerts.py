@@ -271,6 +271,14 @@ async def _check_sold_out(mint: dict, phase: dict):
         from utils.parser import check_mint_status
         status = await check_mint_status(mint)
         if status.get('sold_out'):
+            # Update minted count in DB so the alert shows correct supply
+            actual_minted = status.get('minted', 0)
+            actual_supply = status.get('total', total_supply)
+            if actual_minted:
+                update_mint(mint['id'], minted=actual_minted)
+                mint = dict(mint)
+                mint['minted'] = actual_minted
+                mint['total_supply'] = actual_supply
             await _trigger_sold_out(mint, phase)
     except Exception as e:
         logger.debug(f"Sold-out check failed for {mint.get('name')}: {e}")

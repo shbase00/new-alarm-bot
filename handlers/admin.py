@@ -14,13 +14,18 @@ from database import (
     get_all_mints, get_mint, add_mint, update_mint, delete_mint,
     get_channels, add_channel, remove_channel, init_db, get_conn
 )
-from utils.parser import parse_mint_url, parse_multiple_urls
+from utils.parser import parse_mint_url, parse_multiple_urls, get_market_links
 from utils.formatter import format_mint_card, format_mint_list
 
 logger = logging.getLogger(__name__)
 
 # ── Conversation states ───────────────────────────────────────
 WAITING_LINK         = 1
+WAITING_FIRST_TIME   = 2
+WAITING_PHASE_NAMES  = 3
+WAITING_INTERVAL     = 4
+WAITING_PRICES       = 5
+WAITING_LIMITS       = 6
 WAITING_EDIT_VALUE   = 7
 WAITING_CHANNEL      = 8
 # Phase builder states
@@ -31,17 +36,12 @@ PB_NEXT_NAME         = 13
 PB_PRICE             = 14   # price for current phase being added
 EDIT_PHASE_VAL       = 20   # editing a specific phase field
 WAITING_CONTRACT     = 21   # waiting for contract address
-# Legacy aliases
-WAITING_FIRST_TIME   = 2
-WAITING_PHASE_NAMES  = 3
-WAITING_INTERVAL     = 4
-WAITING_PRICES       = 5
-WAITING_LIMITS       = 6
-SMART_PHASE_NAME     = 10
-SMART_PHASE_TIME     = 11
-SMART_PHASE_PRICE    = 12
-SMART_PHASE_LIMIT    = 13
 WAITING_CONFIRM      = 22   # multi-link detection confirmation
+# Legacy aliases (map to phase builder states for backward compat)
+SMART_PHASE_NAME     = PB_FIRST_NAME
+SMART_PHASE_TIME     = PB_FIRST_TIME
+SMART_PHASE_PRICE    = PB_NEXT_INTERVAL
+SMART_PHASE_LIMIT    = PB_NEXT_NAME
 
 # ── AUTH ─────────────────────────────────────────────────────
 
@@ -170,12 +170,11 @@ def parse_datetime(text: str) -> datetime | None:
         'january':1,'february':2,'march':3,'april':4,'june':6,
         'july':7,'august':8,'september':9,'october':10,'november':11,'december':12,
     }
-    import re as _re
     for pat in [
         r'([A-Za-z]+)\s+(\d{1,2})(?:,?\s*(\d{4}))?\s+(\d{1,2}:\d{2})',
         r'(\d{1,2})\s+([A-Za-z]+)(?:,?\s*(\d{4}))?\s+(\d{1,2}:\d{2})',
     ]:
-        m = _re.match(pat, text)
+        m = re.match(pat, text)
         if m:
             g = m.groups()
             # First pattern: month_str day [year] time
@@ -193,22 +192,6 @@ def parse_datetime(text: str) -> datetime | None:
                 except Exception:
                     pass
     return None
-
-def build_phases(first_time: datetime, names: list, interval_minutes: int,
-                 prices: list, limits: list) -> list:
-    """Build phase list from inputs"""
-    phases = []
-    for i, name in enumerate(names):
-        phase_time = first_time + timedelta(minutes=interval_minutes * i)
-        price = prices[i] if i < len(prices) else prices[-1] if prices else "TBA"
-        limit = limits[i] if i < len(limits) else limits[-1] if limits else "N/A"
-        phases.append({
-            "name":  name.strip(),
-            "time":  phase_time.strftime("%Y-%m-%d %H:%M"),
-            "price": price.strip(),
-            "limit": limit.strip(),
-        })
-    return phases
 
 def format_phases_preview(phases: list) -> str:
     lines = ["📋 *Phase Preview:*\n"]
@@ -294,7 +277,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except: return datetime(9999,1,1)
         todays = sorted(todays, key=_phase_time)
         msg = format_daily_summary(todays)
-        await query.edit_message_text(msg, parse_mode='Markdown', disable_web_page_preview=True,
+        await query.edit_message_text(msg, parse_mode='HTML', disable_web_page_preview=True,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Dashboard", callback_data="dashboard")]]))
 
     elif data == "send_summary_now":
@@ -472,7 +455,6 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         detected_dt = None
         if mint_link:
             await query.edit_message_text(f"⏱ *Rebuilding phases for: {mint['name']}*\n\n⏳ Trying to auto-detect time from mint page...")
-            from utils.parser import parse_mint_url, parse_multiple_urls
             mint_data = await parse_mint_url(mint_link)
             detected_dt = mint_data.get('first_phase_time')
 
@@ -702,11 +684,10 @@ async def add_mint_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return WAITING_LINK
 
 async def add_mint_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    import re as _re
     text = update.message.text.strip()
 
     # Extract all https URLs from message
-    urls = _re.findall(r'https?://[^\s]+', text)
+    urls = re.findall(r'https?://[^\s]+', text)
     # Filter to valid URLs (has a domain)
     urls = [u for u in urls if '.' in u]
 
@@ -753,7 +734,7 @@ async def add_mint_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             extras['market_links'] = ml
         os_link = d.get('os_link', '')
         if not os_link and 'opensea.io' in url:
-            m = _re.search(r'(opensea\.io/collection/[^/?#]+)', url)
+            m = re.search(r'(opensea\.io/collection/[^/?#]+)', url)
             if m: os_link = 'https://' + m.group(1)
         if os_link: extras['os_link'] = os_link
         if extras:
@@ -803,7 +784,6 @@ async def add_mint_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def _show_single_summary(update, ctx, mint_data: dict, mint_id: int):
     """Show full confirmation summary for a single mint."""
-    import json as _json
     name     = mint_data.get('name', 'Unknown')
     chain    = mint_data.get('chain', 'Unknown')
     phases   = mint_data.get('phases', [])
@@ -813,7 +793,7 @@ async def _show_single_summary(update, ctx, mint_data: dict, mint_id: int):
     supply   = mint_data.get('total_supply', 0)
     mlinks   = mint_data.get('market_links', {})
     if isinstance(mlinks, str):
-        try: mlinks = _json.loads(mlinks)
+        try: mlinks = json.loads(mlinks)
         except: mlinks = {}
     os_link   = mint_data.get('os_link', '')
     countdown = mint_data.get('countdown_detected', False)
@@ -874,7 +854,6 @@ def _decide_next_state(mint_data: dict):
     if mint_data.get('first_phase_time'):
         return PB_FIRST_NAME
     # No phases, no time detected — ask user for time first
-    return PB_FIRST_TIME
     return PB_FIRST_TIME
 
 
@@ -1187,7 +1166,6 @@ async def handle_text_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return WAITING_CONTRACT
 
         loading = await update.message.reply_text("⏳ Fetching market links...")
-        from utils.parser import get_market_links
         links = await get_market_links(contract, mint.get('chain', 'Ethereum'))
         await loading.delete()
 
@@ -1320,9 +1298,6 @@ async def add_channel_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
     return WAITING_CHANNEL
-
-async def delete_mint_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    pass
 
 async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.clear()

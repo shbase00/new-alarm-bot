@@ -15,7 +15,12 @@ from handlers.admin import (
     step_first_time, step_phase_names, step_interval, step_prices, step_limits,
     smart_phase_name, smart_phase_time, smart_phase_price, smart_phase_limit,
     smart_add_phase_cb, smart_done_cb,
-    handle_text_input, cancel
+    handle_text_input, cancel,
+    # State constants — single source of truth in admin.py
+    WAITING_LINK, WAITING_FIRST_TIME, WAITING_PHASE_NAMES, WAITING_INTERVAL,
+    WAITING_PRICES, WAITING_LIMITS, WAITING_EDIT_VALUE, WAITING_CHANNEL,
+    WAITING_CONTRACT, PB_FIRST_NAME, PB_FIRST_TIME, PB_NEXT_INTERVAL,
+    PB_NEXT_NAME, PB_PRICE, EDIT_PHASE_VAL,
 )
 from handlers.alerts import setup_scheduler
 from handlers.commands import help_command, status_command
@@ -24,22 +29,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-
-WAITING_LINK        = 1
-WAITING_FIRST_TIME  = 2
-WAITING_PHASE_NAMES = 3
-WAITING_INTERVAL    = 4
-WAITING_PRICES      = 5
-WAITING_LIMITS      = 6
-WAITING_EDIT_VALUE  = 7
-EDIT_PHASE_VAL     = 20
-WAITING_CONTRACT   = 21
-WAITING_CHANNEL  = 8
-PB_FIRST_NAME    = 10
-PB_FIRST_TIME    = 11
-PB_NEXT_INTERVAL = 12
-PB_NEXT_NAME     = 13
-PB_PRICE         = 14
 
 TEXT = filters.TEXT & ~filters.COMMAND
 

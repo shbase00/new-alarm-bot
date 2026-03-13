@@ -1,8 +1,10 @@
 """
-Message Formatter - Creates nicely formatted Telegram messages (HTML parse mode)
+Message Formatter
+- format_mint_card / format_mint_list / format_phases_preview → Markdown (used by admin dashboard)
+- format_daily_summary → HTML (used by alerts scheduler and admin summary)
+All alert messages are formatted directly in handlers/alerts.py using HTML.
 """
-import json
-from datetime import datetime, timezone
+from datetime import datetime
 
 CHAIN_EMOJIS = {
     'ethereum': '⟠', 'base': '🔵', 'blast': '💥', 'arbitrum': '🔷',
@@ -17,7 +19,8 @@ STATUS_EMOJIS = {
 NUMBER_EMOJIS = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟']
 
 
-def _esc(text: str) -> str:
+def _esc_html(text: str) -> str:
+    """Escape HTML special characters."""
     return str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 
@@ -29,61 +32,19 @@ def get_status_emoji(status: str) -> str:
     return STATUS_EMOJIS.get(status, '⏳')
 
 
-def format_daily_summary(mints_today: list) -> str:
-    """
-    Format the daily summary in the required format:
-    📅 TODAY'S MINTS
-
-    1️⃣ Bittys
-       🕐 WL: 2026-03-12 17:00
-       ⟠ Ethereum
-       💰 0.005 ETH
-       🔗 Mint Link
-
-    Updated: 2026-03-12 15:06 UTC
-    """
-    if not mints_today:
-        return "📅 <b>TODAY'S MINTS</b>\n\nNo mints scheduled for today!"
-
-    lines = ["📅 <b>TODAY'S MINTS</b>\n"]
-
-    for idx, (mint, phase) in enumerate(mints_today):
-        num_emoji = NUMBER_EMOJIS[idx] if idx < len(NUMBER_EMOJIS) else f'{idx + 1}.'
-        chain = mint.get('chain', 'Unknown')
-        chain_emoji = get_chain_emoji(chain)
-        price = _esc(phase.get('price', 'TBA'))
-        time_str = _esc(phase.get('time', 'TBA') or 'TBA')
-        phase_name = _esc(phase.get('name', 'Phase'))
-        name = _esc(mint.get('name', 'Unknown'))
-
-        mint_link = mint.get('mint_link', '')
-        link_html = f'<a href="{mint_link}">Mint Link</a>' if mint_link else 'No link'
-
-        lines.append(
-            f'{num_emoji} <b>{name}</b>\n'
-            f'   🕐 {phase_name}: {time_str}\n'
-            f'   {chain_emoji} {_esc(chain)}\n'
-            f'   💰 {price}\n'
-            f'   🔗 {link_html}'
-        )
-        lines.append('')
-
-    now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M')
-    lines.append(f'Updated: {now_str} UTC')
-    return '\n'.join(lines)
-
+# ── ADMIN DASHBOARD FUNCTIONS (Markdown) ──────────────────────
 
 def format_mint_card(mint: dict) -> str:
-    """Format a single mint as a detailed info card (HTML)."""
-    chain = mint.get('chain', 'Unknown')
-    chain_emoji = get_chain_emoji(chain)
-    status = mint.get('status', 'upcoming')
+    """Format a single mint as a detailed info card. Returns Markdown."""
+    chain        = mint.get('chain', 'Unknown')
+    chain_emoji  = get_chain_emoji(chain)
+    status       = mint.get('status', 'upcoming')
     status_emoji = get_status_emoji(status)
-    paused = "⏸ <b>PAUSED</b>\n" if mint.get('paused') else ""
+    paused       = "⏸ *PAUSED*\n" if mint.get('paused') else ""
 
     lines = [
-        f"{paused}<b>{_esc(mint['name'])}</b>",
-        f"{chain_emoji} {_esc(chain)}  {status_emoji} {status.upper()}",
+        f"{paused}📛 *{mint['name']}*",
+        f"{chain_emoji} {chain}  {status_emoji} {status.upper()}",
         f"🔗 {mint.get('mint_link', 'No link')}",
         "",
     ]
@@ -94,7 +55,7 @@ def format_mint_card(mint: dict) -> str:
 
     phases = mint.get('phases', [])
     if phases:
-        lines.append(f"\n📋 <b>{len(phases)} Phase(s):</b>\n")
+        lines.append(f"\n📋 *{len(phases)} Phase(s):*\n")
         for i, p in enumerate(phases, 1):
             time_str = p.get('time', 'TBA') or 'TBA'
             end_time = p.get('end_time', '')
@@ -103,36 +64,36 @@ def format_mint_card(mint: dict) -> str:
             else:
                 time_display = f"{time_str} UTC" if time_str != 'TBA' else 'TBA'
             lines.append(
-                f"<b>Phase {i}: {_esc(p.get('name', '?'))}</b>\n"
-                f"  🕐 {_esc(time_display)}\n"
-                f"  💰 {_esc(p.get('price', 'TBA'))}\n"
+                f"*Phase {i}: {p.get('name', '?')}*\n"
+                f"  🕐 {time_display}\n"
+                f"  💰 {p.get('price', 'TBA')}\n"
             )
     else:
         lines.append("📋 No phases set yet.")
 
     if mint.get('x_link'):
-        lines.append(f"🐦 <a href=\"{mint['x_link']}\">Twitter</a>")
+        lines.append(f"🐦 {mint['x_link']}")
     if mint.get('discord_link'):
-        lines.append(f"💬 <a href=\"{mint['discord_link']}\">Discord</a>")
+        lines.append(f"💬 {mint['discord_link']}")
     if mint.get('os_link'):
-        lines.append(f"🌊 <a href=\"{mint['os_link']}\">OpenSea</a>")
+        lines.append(f"🌊 {mint['os_link']}")
 
     if mint.get('notes'):
-        lines.append(f"\n<i>{_esc(mint['notes'])}</i>")
+        lines.append(f"\n_{mint['notes']}_")
 
     return "\n".join(lines)
 
 
 def format_mint_list(mints: list) -> str:
-    """Format list of all mints for dashboard (HTML)."""
+    """Format list of all mints for dashboard. Returns Markdown."""
     if not mints:
         return "No mints added yet. Use ➕ Add Mint to get started!"
 
-    lines = ["📋 <b>All Tracked Mints</b>\n"]
+    lines = ["📋 *All Tracked Mints*\n"]
     for m in mints:
         status_emoji = get_status_emoji(m.get('status', 'upcoming'))
-        paused = "⏸" if m.get('paused') else ""
-        chain_emoji = get_chain_emoji(m.get('chain', 'Unknown'))
+        paused       = "⏸" if m.get('paused') else ""
+        chain_emoji  = get_chain_emoji(m.get('chain', 'Unknown'))
         phases = m.get('phases', [])
         time_hint = ''
         for p in phases:
@@ -141,15 +102,15 @@ def format_mint_list(mints: list) -> str:
                 time_hint = f" — {t} UTC"
                 break
         lines.append(
-            f"{status_emoji}{paused} <b>{_esc(m['name'])}</b> {chain_emoji} "
-            f"(#{m['id']}){_esc(time_hint)}"
+            f"{status_emoji}{paused} *{m['name']}* {chain_emoji} "
+            f"(#{m['id']}){time_hint}"
         )
 
     return "\n".join(lines)
 
 
 def format_phases_preview(phases: list) -> str:
-    """Compact phase preview for confirmations (HTML)."""
+    """Compact phase preview for confirmations. Returns Markdown."""
     lines = []
     for i, p in enumerate(phases, 1):
         time_str = p.get('time', '') or 'TBA'
@@ -159,9 +120,57 @@ def format_phases_preview(phases: list) -> str:
         else:
             time_display = f"{time_str} UTC" if time_str != 'TBA' else 'TBA'
         lines.append(
-            f"<b>Phase {i}:</b>\n"
-            f"{_esc(p.get('name', '?'))}\n"
-            f"🕐 Time: {_esc(time_display)}\n"
-            f"💰 Price: {_esc(p.get('price', 'TBA'))}"
+            f"*Phase {i}:*\n"
+            f"{p.get('name', '?')}\n"
+            f"🕐 Time: {time_display}\n"
+            f"💰 Price: {p.get('price', 'TBA')}"
         )
     return "\n\n".join(lines)
+
+
+# ── DAILY SUMMARY (HTML — used by scheduler and admin) ─────────
+
+def format_daily_summary(mints_today: list) -> str:
+    """
+    Format the daily 📅 TODAY'S MINTS message.
+    Returns HTML (parse_mode='HTML').
+
+    Format:
+    📅 TODAY'S MINTS
+
+    1️⃣ Bittys
+       🕐 WL: 2026-03-12 17:00
+       ⟠ Ethereum
+       💰 0.005 ETH
+       🔗 <a href="...">Mint Link</a>
+
+    Updated: 2026-03-12 15:06 UTC
+    """
+    if not mints_today:
+        return "📅 <b>TODAY'S MINTS</b>\n\nNo mints scheduled for today!"
+
+    lines = ["📅 <b>TODAY'S MINTS</b>\n"]
+
+    for idx, (mint, phase) in enumerate(mints_today):
+        num_emoji   = NUMBER_EMOJIS[idx] if idx < len(NUMBER_EMOJIS) else f"{idx + 1}."
+        chain       = mint.get('chain', 'Unknown')
+        chain_emoji = get_chain_emoji(chain)
+        price       = _esc_html(phase.get('price', 'TBA'))
+        time_str    = _esc_html(phase.get('time', 'TBA') or 'TBA')
+        phase_name  = _esc_html(phase.get('name', 'Phase'))
+        name        = _esc_html(mint.get('name', 'Unknown'))
+        mint_link   = mint.get('mint_link', '')
+        link_html   = f'<a href="{mint_link}">Mint Link</a>' if mint_link else 'No link'
+
+        lines.append(
+            f"{num_emoji} <b>{name}</b>\n"
+            f"   🕐 {phase_name}: {time_str}\n"
+            f"   {chain_emoji} {_esc_html(chain)}\n"
+            f"   💰 {price}\n"
+            f"   🔗 {link_html}"
+        )
+        lines.append("")
+
+    now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M')
+    lines.append(f"Updated: {now_str} UTC")
+    return "\n".join(lines)

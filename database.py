@@ -36,6 +36,7 @@ def init_db():
             contract TEXT DEFAULT '',
             discord_link TEXT DEFAULT '',
             total_supply INTEGER DEFAULT 0,
+            minted INTEGER DEFAULT 0,
             market_links TEXT DEFAULT '{}',
             fast_mint_alerted INTEGER DEFAULT 0
         )
@@ -85,6 +86,7 @@ def init_db():
         "ALTER TABLE mints ADD COLUMN contract TEXT DEFAULT ''",
         "ALTER TABLE mints ADD COLUMN discord_link TEXT DEFAULT ''",
         "ALTER TABLE mints ADD COLUMN total_supply INTEGER DEFAULT 0",
+        "ALTER TABLE mints ADD COLUMN minted INTEGER DEFAULT 0",
         "ALTER TABLE mints ADD COLUMN market_links TEXT DEFAULT '{}'",
         "ALTER TABLE mints ADD COLUMN fast_mint_alerted INTEGER DEFAULT 0",
     ]:

@@ -4,7 +4,6 @@ POST /api/mint  →  stores mint + triggers alert
 GET  /health    →  Railway health check
 """
 import asyncio
-import json
 import logging
 from aiohttp import web
 from config import API_SECRET_KEY, API_PORT
@@ -45,17 +44,21 @@ async def _handle_post_mint(request: web.Request) -> web.Response:
         return web.json_response({"error": "phases must be a non-empty list"}, status=400)
 
     # Build mint dict — reuse or create DB record
-    from database import (
-        get_all_mints, add_mint, update_mint, get_channels
-    )
+    from database import get_all_mints, get_mint, add_mint, update_mint
 
     name = body["name"].strip()
     chain = body.get("chain", "Ethereum")
     mint_link = body.get("mint_link", "")
     twitter = body.get("twitter", "")
     discord = body.get("discord", "")
-    total_supply = int(body.get("supply", 0))
-    minted = int(body.get("minted", 0))
+    try:
+        total_supply = int(body.get("supply", 0))
+    except (TypeError, ValueError):
+        total_supply = 0
+    try:
+        minted = int(body.get("minted", 0))
+    except (TypeError, ValueError):
+        minted = 0
 
     # Normalise phases to the internal format
     phases = []
@@ -82,12 +85,9 @@ async def _handle_post_mint(request: web.Request) -> web.Response:
             status="upcoming",
         )
         mint_id = existing["id"]
-        from database import get_mint
-        mint = get_mint(mint_id)
         action = "updated"
     else:
         mint_id = add_mint(name, chain, mint_link, phases=phases)
-        # Set extra fields
         update_mint(
             mint_id,
             x_link=twitter,
@@ -95,9 +95,9 @@ async def _handle_post_mint(request: web.Request) -> web.Response:
             total_supply=total_supply,
             minted=minted,
         )
-        from database import get_mint
-        mint = get_mint(mint_id)
         action = "created"
+
+    mint = get_mint(mint_id)
 
     logger.info(f"[api] Mint {action}: {name} (id={mint_id})")
 

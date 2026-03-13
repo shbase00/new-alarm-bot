@@ -24,11 +24,9 @@ ADMIN_USER_IDS = [
 # OPTIONAL SETTINGS
 # ============================================================
 
-# How many minutes before each mint phase to send alerts (first alert)
+# How many minutes before each mint phase to send the first alert (default: 15)
 ALERT_MINUTES_BEFORE = int(os.getenv("ALERT_MINUTES_BEFORE", "15"))
-
-# Second alert: when mint starts (0 minutes before)
-ALERT_MINUTES_LIVE = 0
+# The second alert fires when the mint goes live (handled by the ±2 min live window in alerts.py)
 
 # Daily summary time (24h format, UTC) - send at 10:00 UTC
 DAILY_SUMMARY_HOUR = int(os.getenv("DAILY_SUMMARY_HOUR", "10"))
