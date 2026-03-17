@@ -429,8 +429,17 @@ function parseOpenSeaPageText(text) {
 
   const MONTH_RE = /^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d/i;
   const PRICE_RE = /^(\d+\.?\d*)\s*(ETH|SOL|MATIC|BNB|AVAX)/i;
-  const FREE_RE  = /^free$/i;
+  const FREE_RE  = /^free\b/i;  // matches "Free" and "Free · max 2"
   const LIMIT_RE = /max\s+(\d+)/i;
+
+  // Currency/chain labels that OpenSea renders between phase name and date.
+  // These should be skipped, not treated as phase names.
+  const SKIP_LINE = new Set([
+    'eth', 'ethereum', 'sol', 'solana', 'matic', 'polygon', 'base', 'bnb',
+    'avax', 'avalanche', 'arb', 'arbitrum', 'op', 'optimism', 'blast',
+    'zora', 'linea', 'abstract', 'apechain', 'starknet', 'btc', 'bitcoin',
+    'usdc', 'usdt', 'weth',
+  ]);
 
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
 
@@ -438,12 +447,19 @@ function parseOpenSeaPageText(text) {
   while (i < lines.length) {
     const line = lines[i];
 
-    // A phase name is any non-date, non-price line followed by a date line
+    // Skip bare currency/chain labels entirely
+    if (SKIP_LINE.has(line.toLowerCase())) { i++; continue; }
+
+    // A phase name is any non-date, non-price, non-skip line followed
+    // (possibly after interleaved currency labels) by a date line
     if (!MONTH_RE.test(line) && !PRICE_RE.test(line) && !FREE_RE.test(line)) {
-      const next = lines[i + 1] || '';
+      // Look ahead past any currency/chain labels to find a date
+      let look = i + 1;
+      while (look < lines.length && SKIP_LINE.has(lines[look].toLowerCase())) look++;
+      const next = lines[look] || '';
       if (MONTH_RE.test(next)) {
         const phase = { name: line, time: null, end_time: null, price: 'TBD', limit: null };
-        i++; // move to first date line
+        i = look; // jump past any skipped labels to the date line
 
         // First date = start time
         const startParsed = parseTime(lines[i]);
@@ -457,7 +473,10 @@ function parseOpenSeaPageText(text) {
           i++;
         }
 
-        // Price line (may include "· max N")
+        // Skip any currency labels before the price line
+        while (i < lines.length && SKIP_LINE.has(lines[i].toLowerCase())) i++;
+
+        // Price line (may include "· max N" or "Free · max N")
         if (i < lines.length) {
           const priceLine = lines[i];
           const priceMatch = priceLine.match(PRICE_RE);
@@ -468,6 +487,8 @@ function parseOpenSeaPageText(text) {
             i++;
           } else if (FREE_RE.test(priceLine)) {
             phase.price = 'Free';
+            const limitMatch = priceLine.match(LIMIT_RE);
+            if (limitMatch) phase.limit = limitMatch[1];
             i++;
           }
         }
