@@ -1025,7 +1025,7 @@ def _decide_next_state(mint_data: dict):
     if phases and all(p.get('time') for p in phases):
         return ConversationHandler.END
     if phases and not all(p.get('time') for p in phases):
-        return SMART_PHASE_TIME
+        return PB_FIRST_TIME
     if mint_data.get('first_phase_time'):
         return PB_FIRST_NAME
     # No phases, no time detected — ask user for time first
