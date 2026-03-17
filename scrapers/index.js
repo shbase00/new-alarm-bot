@@ -96,8 +96,10 @@ function mergeDetectionResults({ launchpad, osDrop, osCollection, browser, mintU
   for (const s of [launchpad, osDrop, osCollection, browser]) {
     if (s?.chain) { result.chain = s.chain; break; }
   }
-  // Text-based chain detection as final fallback
-  if (result.chain === 'Ethereum' && browser?.text) {
+  // Text-based chain detection ONLY when no API source returned a chain
+  // (avoids overriding a correct "Ethereum" with unrelated page mentions of other chains)
+  const hasApiChain = [launchpad, osDrop, osCollection].some(s => s?.chain);
+  if (!hasApiChain && browser?.text) {
     result.chain = detectChainFromText(browser.text) || result.chain;
   }
 
@@ -234,7 +236,7 @@ async function scrapeOpenSeaPage(url) {
     // Phase data is loaded by client-side fetches after hydration.
     // Poll every 2 s so we exit as soon as data arrives.
     const MONTH_RE = /January|February|March|April|May|June|July|August|September|October|November|December/;
-    const PRICE_RE = /\d+\.?\d*\s*ETH/i;
+    const PRICE_RE = /\d+\.?\d*\s*ETH|\bfree\b/i; // also match free mints
     const deadline = Date.now() + 18000;
 
     while (Date.now() < deadline) {
@@ -410,9 +412,7 @@ function parseOpenSeaApiBody(body) {
  *   0.08 ETH · max 5
  */
 function parseOpenSeaPageText(text) {
-  const phases = [];
-
-  if (!text) return { phases };
+  if (!text) return { phases: [] };
 
   // Countdown: "Minting in 1 day 3 hours 20 minutes"
   const countdownMatch = text.match(
@@ -423,17 +423,15 @@ function parseOpenSeaPageText(text) {
     const h = parseInt(countdownMatch[2] || 0);
     const m = parseInt(countdownMatch[3] || 0);
     const time = new Date(Date.now() + (d * 86400 + h * 3600 + m * 60) * 1000).toISOString();
-    phases.push({ name: 'Public Mint', time, price: 'TBD', limit: null });
-    return { phases, countdown_detected: true };
+    return { phases: [{ name: 'Public Mint', time, price: 'TBD', limit: null }], countdown_detected: true };
   }
 
   const MONTH_RE = /^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d/i;
   const PRICE_RE = /^(\d+\.?\d*)\s*(ETH|SOL|MATIC|BNB|AVAX)/i;
-  const FREE_RE  = /^free\b/i;  // matches "Free" and "Free · max 2"
+  const FREE_RE  = /^free\b/i;
   const LIMIT_RE = /max\s+(\d+)/i;
 
-  // Currency/chain labels that OpenSea renders between phase name and date.
-  // These should be skipped, not treated as phase names.
+  // Standalone currency/chain labels OpenSea renders between phase name and date
   const SKIP_LINE = new Set([
     'eth', 'ethereum', 'sol', 'solana', 'matic', 'polygon', 'base', 'bnb',
     'avax', 'avalanche', 'arb', 'arbitrum', 'op', 'optimism', 'blast',
@@ -441,79 +439,90 @@ function parseOpenSeaPageText(text) {
     'usdc', 'usdt', 'weth',
   ]);
 
+  function extractPrice(line) {
+    const m = line.match(PRICE_RE);
+    if (m) {
+      const lim = line.match(LIMIT_RE);
+      return { price: `${m[1]} ${m[2].toUpperCase()}`, limit: lim ? lim[1] : null };
+    }
+    if (FREE_RE.test(line)) {
+      const lim = line.match(LIMIT_RE);
+      return { price: 'Free', limit: lim ? lim[1] : null };
+    }
+    return null;
+  }
+
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
 
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
+  // ── Date-anchored strategy ─────────────────────────────────────────────
+  // Handles all observed OpenSea /overview layout variants:
+  //   A) phase-name → [ETH] → date → [end-date] → price
+  //   B) phase-name → date → price
+  //   C) price/Free → date (price appears before date)
+  //   D) [ETH] → date (no explicit phase name)
 
-    // Skip bare currency/chain labels entirely
-    if (SKIP_LINE.has(line.toLowerCase())) { i++; continue; }
+  const phases = [];
+  const usedAsEndTime = new Set();
 
-    // A phase name is any non-date, non-price, non-skip line followed
-    // (possibly after interleaved currency labels) by a date line
-    if (!MONTH_RE.test(line) && !PRICE_RE.test(line) && !FREE_RE.test(line)) {
-      // Look ahead past any currency/chain labels to find a date
-      let look = i + 1;
-      while (look < lines.length && SKIP_LINE.has(lines[look].toLowerCase())) look++;
-      const next = lines[look] || '';
-      if (MONTH_RE.test(next)) {
-        const phase = { name: line, time: null, end_time: null, price: 'TBD', limit: null };
-        i = look; // jump past any skipped labels to the date line
+  for (let di = 0; di < lines.length; di++) {
+    if (!MONTH_RE.test(lines[di])) continue;
+    if (usedAsEndTime.has(di)) continue; // already consumed as end-time of previous phase
 
-        // First date = start time
-        const startParsed = parseTime(lines[i]);
-        if (startParsed) phase.time = startParsed.toISOString();
-        i++;
+    const startParsed = parseTime(lines[di]);
+    if (!startParsed) continue;
 
-        // If next line is also a date, treat as end time
-        if (i < lines.length && MONTH_RE.test(lines[i])) {
-          const endParsed = parseTime(lines[i]);
-          if (endParsed) phase.end_time = endParsed.toISOString();
-          i++;
-        }
+    const phase = { name: 'Public Mint', time: startParsed.toISOString(), end_time: null, price: 'TBD', limit: null };
 
-        // Skip any currency labels before the price line
-        while (i < lines.length && SKIP_LINE.has(lines[i].toLowerCase())) i++;
-
-        // Price line (may include "· max N" or "Free · max N")
-        if (i < lines.length) {
-          const priceLine = lines[i];
-          const priceMatch = priceLine.match(PRICE_RE);
-          if (priceMatch) {
-            phase.price = `${priceMatch[1]} ${priceMatch[2].toUpperCase()}`;
-            const limitMatch = priceLine.match(LIMIT_RE);
-            if (limitMatch) phase.limit = limitMatch[1];
-            i++;
-          } else if (FREE_RE.test(priceLine)) {
-            phase.price = 'Free';
-            const limitMatch = priceLine.match(LIMIT_RE);
-            if (limitMatch) phase.limit = limitMatch[1];
-            i++;
-          }
-        }
-
-        phases.push(phase);
+    // Look back up to 4 lines for phase name and/or price-before-date
+    for (let back = di - 1; back >= Math.max(0, di - 4); back--) {
+      const bl = lines[back];
+      if (!bl || MONTH_RE.test(bl)) break; // hit another date block
+      if (SKIP_LINE.has(bl.toLowerCase())) continue;
+      const priceInfo = extractPrice(bl);
+      if (priceInfo) {
+        // Price sits before the date (e.g. "Free\nMarch 19 at 2:00 PM UTC")
+        if (phase.price === 'TBD') { phase.price = priceInfo.price; phase.limit = priceInfo.limit; }
         continue;
       }
+      // Non-date, non-price, non-skip → it's the phase name
+      phase.name = bl;
+      break;
     }
-    i++;
+
+    // Look forward for optional end-time then price
+    let j = di + 1;
+    if (j < lines.length && MONTH_RE.test(lines[j])) {
+      const endParsed = parseTime(lines[j]);
+      if (endParsed) { phase.end_time = endParsed.toISOString(); usedAsEndTime.add(j); j++; }
+    }
+    // Skip currency labels before price
+    while (j < lines.length && SKIP_LINE.has(lines[j].toLowerCase())) j++;
+    if (j < lines.length && phase.price === 'TBD') {
+      const priceInfo = extractPrice(lines[j]);
+      if (priceInfo) { phase.price = priceInfo.price; phase.limit = priceInfo.limit; }
+    }
+
+    phases.push(phase);
   }
 
-  // Fallback: collect any price pattern if no phases found
-  if (phases.length === 0) {
+  // Deduplicate by (name + time)
+  const seen = new Set();
+  const unique = phases.filter(p => {
+    const key = `${p.name}|${p.time}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  // Fallback: no dates found but page has a price → create a TBD phase
+  if (unique.length === 0) {
     const priceMatch = text.match(/(\d+\.?\d*)\s*(ETH|SOL|MATIC|BNB)/i);
     if (priceMatch) {
-      phases.push({
-        name: 'Public Mint',
-        time: null,
-        price: `${priceMatch[1]} ${priceMatch[2].toUpperCase()}`,
-        limit: null,
-      });
+      unique.push({ name: 'Public Mint', time: null, price: `${priceMatch[1]} ${priceMatch[2].toUpperCase()}`, limit: null });
     }
   }
 
-  return { phases };
+  return { phases: unique };
 }
 
 /**
