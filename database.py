@@ -149,9 +149,12 @@ def update_mint(mint_id, **kwargs):
     conn.close()
 
 def delete_mint(mint_id):
+    """Permanently delete a mint and ALL related data from the database."""
     conn = get_conn()
     conn.execute("DELETE FROM mints WHERE id=?", (mint_id,))
     conn.execute("DELETE FROM sent_alerts WHERE mint_id=?", (mint_id,))
+    conn.execute("DELETE FROM floor_history WHERE mint_id=?", (mint_id,))
+    conn.execute("DELETE FROM sweep_events WHERE mint_id=?", (mint_id,))
     conn.commit()
     conn.close()
 

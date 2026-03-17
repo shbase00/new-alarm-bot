@@ -1,20 +1,17 @@
 """NFT Mint Alarm Bot - Main Entry Point"""
 import logging
-import asyncio
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ConversationHandler
 )
 from config import BOT_TOKEN
 from handlers.admin import (
-    start, dashboard, handle_callback, reply_kb,
+    start, dashboard, handle_callback, handle_reply_button,
     add_mint_start, add_mint_link, waiting_supply,
     add_channel_start,
     pb_first_time, pb_first_name, pb_next_interval, pb_next_name, pb_price,
     pb_add_cb, pb_done_cb,
     step_first_time, step_phase_names, step_interval, step_prices, step_limits,
-    smart_phase_name, smart_phase_time, smart_phase_price, smart_phase_limit,
-    smart_add_phase_cb, smart_done_cb,
     handle_text_input, cancel,
     # State constants — single source of truth in admin.py
     WAITING_LINK, WAITING_FIRST_TIME, WAITING_PHASE_NAMES, WAITING_INTERVAL,
@@ -124,10 +121,28 @@ def main():
     app.add_handler(CallbackQueryHandler(pb_done_cb,  pattern="^pb_done_"))
     app.add_handler(CallbackQueryHandler(handle_callback))
 
-    REPLY_BUTTONS = filters.Regex(
-        r"^(➕ Add Mint|📋 All Mints|📅 Today's Mints|📢 Channels|🎛 Dashboard|ℹ️ Help)$"
+    # ── Reply keyboard button: "➕ Add Mint" needs conversation support ──
+    reply_add_mint_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(r"^➕ Add Mint$"), handle_reply_button)],
+        states={
+            WAITING_LINK:     [MessageHandler(TEXT, add_mint_link)],
+            WAITING_SUPPLY:   [MessageHandler(TEXT, waiting_supply)],
+            PB_FIRST_TIME:    [MessageHandler(TEXT, pb_first_time)],
+            PB_FIRST_NAME:    [MessageHandler(TEXT, pb_first_name)],
+            PB_NEXT_INTERVAL: [MessageHandler(TEXT, pb_next_interval)],
+            PB_NEXT_NAME:     [MessageHandler(TEXT, pb_next_name)],
+            PB_PRICE:         [MessageHandler(TEXT, pb_price)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        per_chat=True, per_user=True, per_message=False,
     )
-    app.add_handler(MessageHandler(REPLY_BUTTONS, handle_text_input))
+    app.add_handler(reply_add_mint_conv)
+
+    # ── Reply keyboard buttons (non-conversation ones) ──
+    REPLY_BUTTONS_OTHER = filters.Regex(
+        r"^(📋 All Mints|📅 Today's Mints|📢 Channels|🎛 Dashboard|ℹ️ Help)$"
+    )
+    app.add_handler(MessageHandler(REPLY_BUTTONS_OTHER, handle_reply_button))
 
     async def post_init(application):
         await setup_scheduler(application)
