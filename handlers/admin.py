@@ -37,12 +37,6 @@ PB_NEXT_NAME         = 13
 PB_PRICE             = 14   # price for current phase being added
 EDIT_PHASE_VAL       = 20   # editing a specific phase field
 WAITING_CONTRACT     = 21   # waiting for contract address
-WAITING_CONFIRM      = 22   # multi-link detection confirmation
-# Legacy aliases (map to phase builder states for backward compat)
-SMART_PHASE_NAME     = PB_FIRST_NAME
-SMART_PHASE_TIME     = PB_FIRST_TIME
-SMART_PHASE_PRICE    = PB_NEXT_INTERVAL
-SMART_PHASE_LIMIT    = PB_NEXT_NAME
 
 # ── AUTH ─────────────────────────────────────────────────────
 
@@ -236,6 +230,88 @@ async def dashboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     await update.message.reply_text("🎛 *Dashboard*", parse_mode='Markdown', reply_markup=main_kb())
+
+
+async def handle_reply_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle the persistent bottom reply keyboard buttons."""
+    if not is_admin(update.effective_user.id):
+        return
+    text = update.message.text.strip()
+
+    if text == "➕ Add Mint":
+        ctx.user_data.clear()
+        await update.message.reply_text(
+            "➕ *Add New Mint*\n\n"
+            "Paste the mint page URL and send it here.\n\n"
+            "Supported:\n"
+            "• opensea.io — full auto detect ✅\n"
+            "• any other link — manual phases ✏️\n\n"
+            "⚠️ *Type or paste the URL and press Send.*\n"
+            "_Send /cancel to go back._",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="dashboard")
+            ]])
+        )
+        return WAITING_LINK
+
+    elif text == "📋 All Mints":
+        mints = get_all_mints()
+        def _first_time(m):
+            for p in (m.get('phases') or []):
+                t = p.get('time','')
+                if t:
+                    try: return datetime.strptime(t, "%Y-%m-%d %H:%M")
+                    except: pass
+            return datetime(9999,1,1)
+        mints = sorted(mints, key=_first_time)
+        await update.message.reply_text(
+            format_mint_list(mints), parse_mode='HTML', reply_markup=mint_list_kb(mints)
+        )
+
+    elif text == "📅 Today's Mints":
+        from database import get_todays_mints
+        from utils.formatter import format_daily_summary
+        todays = get_todays_mints()
+        def _phase_time(mp):
+            try: return datetime.strptime(mp[1].get('time',''), "%Y-%m-%d %H:%M")
+            except: return datetime(9999,1,1)
+        todays = sorted(todays, key=_phase_time)
+        msg = format_daily_summary(todays)
+        await update.message.reply_text(msg, parse_mode='HTML', disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Dashboard", callback_data="dashboard")]]))
+
+    elif text == "📢 Channels":
+        channels = get_channels()
+        info = f"{len(channels)} channel(s) configured." if channels else "No channels added yet."
+        await update.message.reply_text(
+            f"📢 *Channel Management*\n\n{info}\n\n"
+            "🔔 = alerts  |  📅 = daily summary\n"
+            "Tap a channel to toggle alerts on/off.\nTap 🗑 to remove it.",
+            parse_mode='Markdown', reply_markup=channels_kb()
+        )
+
+    elif text == "🎛 Dashboard":
+        await update.message.reply_text("🎛 *Dashboard*", parse_mode='Markdown', reply_markup=main_kb())
+
+    elif text == "ℹ️ Help":
+        await update.message.reply_text(
+            "ℹ️ *Help*\n\n"
+            "*Add a mint:*\n"
+            "➕ Add Mint → paste any URL\n\n"
+            "🤖 *Auto-detect (OpenSea links):*\n"
+            "Phases, times, prices & limits are detected automatically.\n\n"
+            "✏️ *Manual entry (all other sites):*\n"
+            "Bot saves name + chain, then you enter phases step by step.\n\n"
+            "*Supported auto-detect:*\n"
+            "• opensea.io ✅ full auto\n"
+            "• all other sites ✏️ manual\n\n"
+            "*Time entry formats:*\n"
+            "`2026-03-25 18:00` • `18:00` _(today)_ • `+60` _(+60 min)_\n\n"
+            "Use the buttons below to manage everything! 👇",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Dashboard", callback_data="dashboard")]])
+        )
 
 # ── MAIN CALLBACK ROUTER ──────────────────────────────────────
 
@@ -534,10 +610,17 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         mint_id = int(data.replace("delete_mint_", ""))
         mint = get_mint(mint_id)
         if not mint:
-            await query.edit_message_text("❌ Mint not found.")
+            await query.edit_message_text("❌ Mint not found.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="view_mints")]]))
             return
         await query.edit_message_text(
-            f"🗑 *Delete: {mint['name']}?*\n\n⚠️ This cannot be undone.",
+            f"🗑 *Delete: {mint['name']}?*\n\n"
+            f"⚠️ This will *permanently* remove this mint and ALL its data:\n"
+            f"• Mint info & phases\n"
+            f"• All sent alerts history\n"
+            f"• Floor price history\n"
+            f"• Sweep events\n\n"
+            f"🚫 *This cannot be undone!*",
             parse_mode='Markdown', reply_markup=confirm_delete_kb(mint_id)
         )
 
@@ -664,11 +747,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "• all other sites ✏️ manual\n\n"
             "*Time entry formats:*\n"
             "`2026-03-25 18:00` • `18:00` _(today)_ • `+60` _(+60 min)_\n\n"
-            "*Commands:*\n"
-            "/start — open bot\n"
-            "/dashboard — dashboard\n"
-            "/status — bot status\n"
-            "/cancel — cancel current action",
+            "Use the buttons below to manage everything! 👇",
             parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Dashboard", callback_data="dashboard")]])
         )
@@ -1195,14 +1274,8 @@ async def pb_done_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
-# ── Legacy stubs so old imports still work ───────────────────
+# ── Legacy stubs used by rebuild_conv in bot.py ───────────────
 
-async def smart_phase_name(update, ctx):  return await pb_first_name(update, ctx)
-async def smart_phase_time(update, ctx):  return await pb_first_time(update, ctx)
-async def smart_phase_price(update, ctx): return await pb_price(update, ctx)
-async def smart_phase_limit(update, ctx): return ConversationHandler.END
-async def smart_add_phase_cb(update, ctx): return await pb_add_cb(update, ctx)
-async def smart_done_cb(update, ctx):      return await pb_done_cb(update, ctx)
 async def step_first_time(update, ctx):   return await pb_first_time(update, ctx)
 async def step_phase_names(update, ctx):  return await pb_first_name(update, ctx)
 async def step_interval(update, ctx):     return await pb_next_interval(update, ctx)

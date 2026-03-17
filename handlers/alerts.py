@@ -81,6 +81,11 @@ def _chain_emoji(chain: str) -> str:
         'optimism': '🔴', 'avalanche': '🔺', 'bnb': '🟡',
         'megaeth': '⚡', 'abstract': '🌀',
         'linea': '🟢', 'scroll': '📜', 'starknet': '🌟',
+        'sonic': '🔵', 'berachain': '🐻', 'bera': '🐻',
+        'apechain': '🦧', 'mantle': '🟩', 'taiko': '🥁',
+        'unichain': '🦄', 'worldchain': '🌍', 'world': '🌍',
+        'celo': '🟡', 'gnosis': '🦉', 'moonbeam': '🌙',
+        'opbnb': '🟡',
     }
     return emojis.get((chain or '').lower(), '⛓')
 
@@ -264,15 +269,55 @@ async def check_and_send_alerts():
             if key not in seen:
                 seen.add(key)
                 unique.append((m, p))
+
+        # Refresh minted counts before sending — DB data may be stale
+        refreshed = []
+        for m, p in unique:
+            try:
+                fresh_m = await _refresh_minted_for_alert(m)
+                refreshed.append((fresh_m, p))
+            except Exception as e:
+                logger.debug(f"Pre-alert minted refresh error for {m.get('name')}: {e}")
+                refreshed.append((m, p))
+
         try:
-            msg = _format_combined_alert(unique, 'pre') if len(unique) > 1 else _format_mint_alert(unique[0][0], 'pre', unique[0][1])
+            msg = _format_combined_alert(refreshed, 'pre') if len(refreshed) > 1 else _format_mint_alert(refreshed[0][0], 'pre', refreshed[0][1])
             await _app.bot.send_message(chat_id=ch_id, text=msg, parse_mode='HTML', disable_web_page_preview=True)
-            logger.info(f"Pre-mint alert sent to {ch_id}: {[m['name'] for m, _ in unique]}")
+            logger.info(f"Pre-mint alert sent to {ch_id}: {[m['name'] for m, _ in refreshed]}")
         except Exception as e:
             logger.error(f"Pre alert send error {ch_id}: {e}")
 
 
 # ── SOLD OUT ─────────────────────────────────────────────────
+
+async def _refresh_minted_for_alert(mint: dict) -> dict:
+    """
+    Fetch fresh minted count right before sending an alert.
+    Returns an updated mint dict with current minted value.
+    This ensures pre-alerts show accurate numbers instead of stale DB data.
+    """
+    from utils.parser import get_minted_count
+    from database import get_mint as db_get_mint
+
+    mid = mint['id']
+
+    # Re-read from DB first (another job may have updated it)
+    fresh = db_get_mint(mid)
+    if fresh:
+        mint = dict(fresh)
+
+    # Now try to fetch live minted count
+    try:
+        minted = await get_minted_count(mint)
+        if minted is not None and minted > 0:
+            update_mint(mid, minted=minted)
+            mint = dict(mint)
+            mint['minted'] = minted
+            logger.info(f"[pre-alert] Refreshed minted for {mint.get('name')}: {minted:,}")
+    except Exception as e:
+        logger.debug(f"[pre-alert] Minted refresh failed for {mint.get('name')}: {e}")
+
+    return mint
 
 async def _check_sold_out(mint: dict, phase: dict):
     try:
@@ -342,8 +387,8 @@ async def check_floor_and_sweeps():
             for p in phases:
                 if p.get('time'):
                     try:
-                        phase_dt = datetime.strptime(p['time'], "%Y-%m-%d %H:%M")
-                        if (datetime.utcnow() - phase_dt).total_seconds() > 120:
+                        phase_dt = datetime.datetime.strptime(p['time'], "%Y-%m-%d %H:%M")
+                        if (datetime.datetime.utcnow() - phase_dt).total_seconds() > 120:
                             # Phase started more than 2 min ago — bot missed the live window
                             status = 'live'
                             update_mint(mint['id'], status='live')
@@ -381,6 +426,25 @@ async def check_floor_and_sweeps():
                     await _track_minted(mint)
                 except Exception as e:
                     logger.debug(f"Minted track error for {mint.get('name')}: {e}")
+
+        # ── Pre-live minted tracking: upcoming mints within 30 min ──
+        # Keeps the DB fresh so pre-alerts show accurate numbers
+        if status == 'upcoming':
+            phases = mint.get('phases') or []
+            for p in phases:
+                if p.get('time'):
+                    try:
+                        phase_dt = datetime.datetime.strptime(p['time'], "%Y-%m-%d %H:%M")
+                        mins_until = (phase_dt - datetime.datetime.utcnow()).total_seconds() / 60
+                        if 0 < mins_until <= 30:
+                            if mint.get('contract') or mint.get('os_link') or mint.get('mint_link'):
+                                try:
+                                    await _track_minted(mint)
+                                except Exception as e:
+                                    logger.debug(f"Pre-live minted track error for {mint.get('name')}: {e}")
+                            break
+                    except Exception:
+                        pass
 
         # ── Floor + sweep: only live/sold_out ──
         if status not in ('live', 'sold_out'):

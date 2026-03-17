@@ -10,12 +10,13 @@ from database import get_all_mints, get_channels
 async def help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "ℹ️ *NFT Mint Alarm Bot*\n\n"
-        "*Commands:*\n"
-        "/start — open dashboard\n"
-        "/dashboard — open dashboard\n"
-        "/status — bot status\n"
-        "/cancel — cancel current action\n\n"
-        "Use the dashboard buttons to manage everything.",
+        "Use the buttons below to manage everything! 👇\n\n"
+        "➕ Add Mint — add a new collection\n"
+        "📋 All Mints — view & edit tracked mints\n"
+        "📅 Today's Mints — see today's schedule\n"
+        "📢 Channels — manage alert channels\n"
+        "🎛 Dashboard — main menu\n\n"
+        "/cancel — cancel current action",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("🎛 Dashboard", callback_data="dashboard")
