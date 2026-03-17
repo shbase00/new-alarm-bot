@@ -869,9 +869,9 @@ ETHERSCAN_CHAIN_IDS = {
     'bsc':      '56',
     'avalanche':'43114',
     'avax':     '43114',
-    # MegaETH + Abstract — testnet only for now, no mainnet chain ID yet
-    # 'megaeth': '...',   ← not live on mainnet yet
-    # 'abstract': '2741', ← Abstract mainnet (via abscan.org, not Etherscan V2)
+    # MegaETH mainnet — chain ID 4326, uses direct RPC (not on Etherscan V2 yet)
+    # Abstract mainnet — uses abscan.org (not Etherscan V2)
+    # Solana — uses Helius/public RPC (not EVM)
 }
 ETHERSCAN_V2_URL = 'https://api.etherscan.io/v2/api'
 
@@ -917,9 +917,11 @@ async def fetch_supply(mint: dict) -> int | None:
 async def get_minted_count(mint: dict) -> int | None:
     """
     Get current minted count for a mint.
-    Priority: Etherscan totalSupply() call → OpenSea stats → None
-    For NFTs, totalSupply() = how many have been minted so far.
-    Returns int or None if unavailable.
+    Priority:
+      1. Etherscan V2 (Ethereum, Base, Polygon, Arbitrum, Optimism, Blast, Linea, Scroll, BNB, Avalanche)
+      2. Abscan (Abstract chain)
+      3. Helius RPC (Solana)
+      4. OpenSea drops API fallback
     """
     import os
 
@@ -927,7 +929,7 @@ async def get_minted_count(mint: dict) -> int | None:
     chain         = (mint.get('chain') or 'Ethereum').lower()
     etherscan_key = os.environ.get('ETHERSCAN_API_KEY', '')
 
-    # ── 1. Etherscan V2: call totalSupply() on the contract ──
+    # ── 1. Etherscan V2 (EVM chains) ──
     if contract and etherscan_key:
         chain_id = ETHERSCAN_CHAIN_IDS.get(chain)
         if chain_id:
@@ -948,7 +950,69 @@ async def get_minted_count(mint: dict) -> int | None:
             except Exception as e:
                 logger.warning(f"[minted] Etherscan error for {mint.get('name')}: {e}")
 
-    # ── 2. OpenSea collections stats fallback ──
+    # ── 2. Abscan (Abstract chain) ──
+    if contract and chain == 'abstract':
+        abscan_key = os.environ.get('ABSCAN_API_KEY', '')
+        if abscan_key:
+            try:
+                url = (
+                    f"https://api.abscan.org/api"
+                    f"?module=proxy&action=eth_call"
+                    f"&to={contract}&data=0x18160ddd&tag=latest"
+                    f"&apikey={abscan_key}"
+                )
+                data = await _get(url, as_json=True, timeout=8)
+                result = (data or {}).get('result', '')
+                if result and result not in ('0x', '0x0', '', None):
+                    count = int(result, 16)
+                    if count > 0:
+                        logger.info(f"[minted] {mint.get('name')}: {count:,} via Abscan")
+                        return count
+            except Exception as e:
+                logger.warning(f"[minted] Abscan error for {mint.get('name')}: {e}")
+
+    # ── 3. MegaETH — direct public RPC (chain ID 4326) ──
+    if contract and chain == 'megaeth':
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post('https://mainnet.megaeth.com/rpc', json={
+                    "jsonrpc": "2.0", "id": 1,
+                    "method": "eth_call",
+                    "params": [{"to": contract, "data": "0x18160ddd"}, "latest"]
+                }, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                    if r.status == 200:
+                        data = await r.json(content_type=None)
+                        result = (data or {}).get('result', '')
+                        if result and result not in ('0x', '0x0', '', None):
+                            count = int(result, 16)
+                            if count > 0:
+                                logger.info(f"[minted] {mint.get('name')}: {count:,} via MegaETH RPC")
+                                return count
+        except Exception as e:
+            logger.warning(f"[minted] MegaETH RPC error for {mint.get('name')}: {e}")
+
+    # ── 4. Solana — getTokenSupply via Helius RPC ──
+    if contract and chain == 'solana':
+        helius_key = os.environ.get('HELIUS_API_KEY', '')
+        rpc_url = f"https://mainnet.helius-rpc.com/?api-key={helius_key}" if helius_key else "https://api.mainnet-beta.solana.com"
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(rpc_url, json={
+                    "jsonrpc": "2.0", "id": 1,
+                    "method": "getTokenSupply",
+                    "params": [contract]
+                }, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                    if r.status == 200:
+                        data = await r.json(content_type=None)
+                        amount = ((data or {}).get('result') or {}).get('value', {}).get('uiAmount')
+                        if amount and int(amount) > 0:
+                            count = int(amount)
+                            logger.info(f"[minted] {mint.get('name')}: {count:,} via Solana RPC")
+                            return count
+        except Exception as e:
+            logger.warning(f"[minted] Solana RPC error for {mint.get('name')}: {e}")
+
+    # ── 4. OpenSea drops API fallback ──
     mint_link = (mint.get('os_link') or mint.get('mint_link') or '').strip()
     slug = _opensea_slug(mint_link)
     if slug:
@@ -956,7 +1020,6 @@ async def get_minted_count(mint: dict) -> int | None:
         if api_key:
             hdrs = {'x-api-key': api_key, 'Accept': 'application/json'}
             try:
-                # Try drops API first (has total_minted for live drops)
                 data = await _get(
                     f"https://api.opensea.io/api/v2/drops/{slug}",
                     headers=hdrs, as_json=True, timeout=8
@@ -972,13 +1035,6 @@ async def get_minted_count(mint: dict) -> int | None:
                         return minted
             except Exception as e:
                 logger.debug(f"[minted] OpenSea drops error for {mint.get('name')}: {e}")
-
-            try:
-                # Fallback: collections stats — 'num_owners' won't help, skip
-                # Only drops API has reliable total_minted
-                pass
-            except Exception:
-                pass
 
     return None
 
