@@ -15,7 +15,7 @@
  * field-name differences across platforms never break the merge step.
  */
 
-const { fetchCollectionData, fetchDropData, buildMarketLinks } = require('./opensea');
+const { fetchCollectionData, fetchDropData, fetchOverviewNextData, buildMarketLinks } = require('./opensea');
 const { scrapeByPlatform, detectPlatform } = require('../platforms');
 const { scrapeUrl, scrapeWithCallback } = require('./browser');
 const { extractOpenSeaSlug, extractPlatform: extractPlatformHost, detectChainFromUrl, detectChainFromText, parseTime, normalizePriceStr } = require('../utils/parser');
@@ -247,8 +247,8 @@ async function scrapeOpenSeaPage(url) {
     const httpStatus = gotoResponse?.status?.() ?? 'unknown';
     logger.info(`OpenSea browser nav → ${url} (HTTP ${httpStatus})`);
     if (httpStatus === 403 || httpStatus === 429) {
-      logger.warn(`OpenSea blocked browser (${httpStatus}) for ${url}`);
-      return { phases: [] };
+      logger.warn(`OpenSea blocked browser (${httpStatus}) — trying plain HTTP fallback for ${url}`);
+      return scrapeOpenSeaPageHttp(url);
     }
 
     // ── Pass 1: __NEXT_DATA__ (available right after DOMContentLoaded) ─────
@@ -324,6 +324,30 @@ async function scrapeOpenSeaPage(url) {
     return result;
 
   }, 35000, { navigate: false });
+}
+
+/**
+ * HTTP-based fallback for OpenSea phase detection when the puppeteer browser
+ * is blocked (403/429). Makes a plain HTTP GET to the /overview page, extracts
+ * any __NEXT_DATA__ or embedded JSON, and falls back to innerText parsing if
+ * the server returns SSR HTML.
+ *
+ * Returns the same shape as scrapeOpenSeaPage: { phases, text?, ... } or null.
+ */
+async function scrapeOpenSeaPageHttp(url) {
+  const slug = extractOpenSeaSlug(url) || url.split('/').filter(Boolean).pop();
+  const nextData = await fetchOverviewNextData(slug);
+  if (nextData) {
+    const result = parseNextData(nextData);
+    if (result && result.phases.length > 0) {
+      logger.info(`OpenSea HTTP fallback: parseNextData found ${result.phases.length} phase(s) for ${slug}`);
+      return result;
+    }
+  }
+  // If __NEXT_DATA__ was found but has no phases, or wasn't found at all,
+  // return empty result so the merge step still has name/chain from other layers.
+  logger.warn(`OpenSea HTTP fallback: no phases found for ${slug}`);
+  return { phases: [] };
 }
 
 /**
