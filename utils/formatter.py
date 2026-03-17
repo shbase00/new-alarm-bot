@@ -10,6 +10,11 @@ CHAIN_EMOJIS = {
     'ethereum': '⟠', 'base': '🔵', 'blast': '💥', 'arbitrum': '🔷',
     'polygon': '🟣', 'optimism': '🔴', 'zora': '🟡', 'solana': '◎',
     'avalanche': '🔺', 'bnb': '🟡', 'unknown': '⛓',
+    'megaeth': '⚡', 'abstract': '🌀', 'linea': '🟢', 'scroll': '📜',
+    'starknet': '🌟', 'sonic': '🔵', 'berachain': '🐻', 'bera': '🐻',
+    'apechain': '🦧', 'mantle': '🟩', 'taiko': '🥁',
+    'unichain': '🦄', 'worldchain': '🌍', 'world': '🌍',
+    'celo': '🟡', 'gnosis': '🦉', 'moonbeam': '🌙', 'opbnb': '🟡',
 }
 
 STATUS_EMOJIS = {
@@ -144,21 +149,21 @@ def format_daily_summary(mints_today: list) -> str:
     Format the daily 📅 TODAY'S MINTS message.
     Returns HTML (parse_mode='HTML').
 
-    Format:
+    New format:
     📅 TODAY'S MINTS
 
-    1️⃣ Bittys
-       🕐 WL: 2026-03-12 17:00
-       ⟠ Ethereum
-       💰 0.005 ETH
-       🔗 <a href="...">Mint Link</a>
+    1️⃣ ZOB ⟠ Ethereum
+    ┣ ZOB_TREASURY — Free — 🕐 2026-03-16 13:30 UTC
+    next phase in 30 minutes
+    🔗 Mint Link
 
-    Updated: 2026-03-12 15:06 UTC
+    Updated: 2026-03-16 07:27 UTC
     """
     if not mints_today:
         return "📅 <b>TODAY'S MINTS</b>\n\nNo mints scheduled for today!"
 
-    lines = ["📅 <b>TODAY'S MINTS</b>\n"]
+    now = datetime.utcnow()
+    lines = ["\n📅 <b>TODAY'S MINTS</b>\n"]
 
     # Group by mint (mints_today may have duplicate mints with different phases)
     seen_ids = {}
@@ -177,27 +182,52 @@ def format_daily_summary(mints_today: list) -> str:
         chain_emoji = get_chain_emoji(chain)
         name        = _esc_html(mint.get('name', 'Unknown'))
         mint_link   = mint.get('mint_link', '')
-        link_html   = f'<a href="{mint_link}">Mint Link</a>' if mint_link else 'No link'
+        os_link     = mint.get('os_link', '')
+        display_link = mint_link or os_link
+
+        # Title line: number + name + chain emoji + chain
+        lines.append(f"{num_emoji} <b>{name}</b> {chain_emoji} {_esc_html(chain)}")
 
         # Use all phases from the mint, not just today's first phase
         all_phases = mint.get('phases') or phases
 
-        phase_lines = []
         for p in all_phases:
-            p_name   = _esc_html(p.get('name', 'Phase'))
-            p_price  = _esc_html(p.get('price', 'TBA'))
-            p_time   = _esc_html(p.get('time', 'TBA') or 'TBA')
-            phase_lines.append(f"   ┣ <b>{p_name}</b> — {p_price} — 🕐 {p_time} UTC")
+            p_name  = _esc_html(p.get('name', 'Phase'))
+            p_price = _esc_html(p.get('price', 'TBA'))
+            p_time  = p.get('time', 'TBA') or 'TBA'
 
-        phases_text = "\n".join(phase_lines)
+            # Phase detail line: ┣ NAME — PRICE — 🕐 TIME UTC
+            lines.append(f"┣ {p_name} — {p_price} — 🕐 {_esc_html(p_time)} UTC")
 
-        lines.append(
-            f"{num_emoji} <b>{name}</b>  {chain_emoji} {_esc_html(chain)}\n"
-            f"{phases_text}\n"
-            f"   🔗 {link_html}"
-        )
-        lines.append("")
+            # Countdown line
+            if p_time and p_time != 'TBA':
+                try:
+                    phase_dt = datetime.strptime(p_time, "%Y-%m-%d %H:%M")
+                    diff_minutes = int((phase_dt - now).total_seconds() / 60)
+                    if diff_minutes > 0:
+                        if diff_minutes >= 60:
+                            hours = diff_minutes // 60
+                            mins  = diff_minutes % 60
+                            if mins > 0:
+                                lines.append(f"next phase in {hours}h {mins}m")
+                            else:
+                                lines.append(f"next phase in {hours}h")
+                        else:
+                            lines.append(f"next phase in {diff_minutes} minutes")
+                    elif diff_minutes == 0:
+                        lines.append("🟢 LIVE NOW")
+                    else:
+                        lines.append("🟢 Already started")
+                except (ValueError, TypeError):
+                    pass
 
-    now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M')
+        # Mint link line
+        if display_link:
+            link_html = f'<a href="{display_link}">Mint Link</a>'
+            lines.append(f"🔗 {link_html}")
+
+        lines.append("")  # blank line between mints
+
+    now_str = now.strftime('%Y-%m-%d %H:%M')
     lines.append(f"Updated: {now_str} UTC")
     return "\n".join(lines)

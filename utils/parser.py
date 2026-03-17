@@ -32,6 +32,7 @@ CHAIN_FROM_DOMAIN = {
     "highlight.xyz": "Ethereum", "magiceden.io": "Solana",
     "sound.xyz": "Ethereum", "mint.fun": "Ethereum",
     "launchmynft.io": "Ethereum", "ordzaar.com": "Bitcoin",
+    "scatter.art": "Ethereum",
 }
 
 CHAIN_NORMALIZE = {
@@ -166,7 +167,8 @@ def _clean_name(name: str) -> str:
     if not name: return ""
     for s in (' | OpenSea', ' - OpenSea', ' | LaunchMyNFT', ' - Collection',
               ' | Ordzaar', ' | Foundation', ' | Manifold', ' | Zora',
-              ' - Collection | OpenSea', ' Collection | OpenSea'):
+              ' - Collection | OpenSea', ' Collection | OpenSea',
+              ' | Highlight', ' | Scatter', ' - Scatter', ' - Highlight'):
         name = name.replace(s, '')
     return name.strip()
 
@@ -603,27 +605,54 @@ async def detect_opensea_parallel(url: str, slug: str) -> dict:
 
     return result
 
-# ─────────────────────────────────────────────
-# MAIN ENTRY POINTS
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════
+# MULTI-PLATFORM DETECTION ENGINE
+# ═══════════════════════════════════════════════
+
+PLATFORM_PATTERNS = {
+    'opensea':     ['opensea.io'],
+    'manifold':    ['manifold.xyz', 'app.manifold.xyz'],
+    'highlight':   ['highlight.xyz'],
+    'scatter':     ['scatter.art'],
+    'launchmynft': ['launchmynft.io'],
+}
+
+def identify_platform(url: str) -> str:
+    """Identify which NFT platform a URL belongs to."""
+    domain = urlparse(url).netloc.lower().replace('www.', '')
+    for platform, patterns in PLATFORM_PATTERNS.items():
+        for pat in patterns:
+            if pat in domain:
+                return platform
+    return 'generic'
+
 
 async def parse_mint_url(url: str) -> dict:
-    domain = urlparse(url).netloc.lower()
+    platform = identify_platform(url)
+    logger.info(f"[Platform Detection] {platform.capitalize()} detected for {url}")
 
-    if 'opensea.io' in domain:
+    if platform == 'opensea':
         slug = _opensea_slug(url)
         if slug:
             result = await detect_opensea_parallel(url, slug)
         else:
             result = {'name': '', 'chain': 'Ethereum', 'phases': [],
                       'success': False, 'needs_manual': True}
+    elif platform == 'manifold':
+        result = await _detect_manifold(url)
+    elif platform == 'highlight':
+        result = await _detect_highlight(url)
+    elif platform == 'scatter':
+        result = await _detect_scatter(url)
+    elif platform == 'launchmynft':
+        result = await _detect_launchmynft(url)
     else:
-        result = await _parse_generic(url)
+        result = await _detect_generic(url)
 
     result['mint_link'] = url
 
-    # Set os_link
-    if 'opensea.io' in domain:
+    # Set os_link for OpenSea
+    if platform == 'opensea':
         slug = _opensea_slug(url)
         if slug:
             result['os_link'] = f"https://opensea.io/collection/{slug}"
@@ -635,7 +664,7 @@ async def parse_mint_url(url: str) -> dict:
 
     # Market links
     if result.get('contract'):
-        slug = _opensea_slug(url) if 'opensea.io' in domain else ''
+        slug = _opensea_slug(url) if platform == 'opensea' else ''
         result['market_links'] = _build_market_links(result['contract'], result.get('chain','Ethereum'), slug)
     else:
         result['market_links'] = {}
@@ -667,35 +696,773 @@ async def parse_multiple_urls(urls: list) -> list:
             out.append(r)
     return out
 
+
 # ─────────────────────────────────────────────
-# Generic (non-OpenSea)
+# PLATFORM: Manifold
 # ─────────────────────────────────────────────
 
-async def _parse_generic(url: str) -> dict:
-    result = {'name': '', 'chain': detect_chain(url), 'phases': [],
-              'success': False, 'needs_manual': True}
-    html = await _get(url, timeout=10)
-    if not html or not HAS_BS4:
+def _extract_next_data(html: str) -> dict:
+    """Extract __NEXT_DATA__ JSON from a Next.js page."""
+    m = re.search(r'<script\s+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except Exception:
+            pass
+    return {}
+
+def _extract_json_ld(html: str) -> list:
+    """Extract all JSON-LD script blocks from HTML."""
+    results = []
+    for m in re.finditer(r'<script\s+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL):
+        try:
+            results.append(json.loads(m.group(1)))
+        except Exception:
+            pass
+    return results
+
+
+async def _detect_manifold(url: str) -> dict:
+    """Detect mint data from manifold.xyz claim/edition pages."""
+    result = _empty_result('Ethereum')
+    logger.info(f"[Manifold] Fetching {url}")
+
+    html = await _get(url, timeout=15)
+    if not html:
+        logger.warning(f"[Manifold] Could not fetch page")
         return result
-    soup = BeautifulSoup(html, 'html.parser')
-    for prop in ['og:title', 'twitter:title']:
-        tag = soup.find('meta', property=prop) or soup.find('meta', attrs={'name': prop})
-        if tag and tag.get('content'):
-            result['name'] = _clean_name(tag['content'])
-            break
-    if not result['name']:
-        h1 = soup.find('h1')
-        if h1: result['name'] = _clean_name(h1.get_text(strip=True))
-    if not result['name'] and soup.title:
-        result['name'] = _clean_name(soup.title.string or '')
-    for a in soup.find_all('a', href=True):
-        href = a['href']
-        if 'twitter.com/' in href or 'x.com/' in href:
-            parts    = href.rstrip('/').split('/')
-            username = parts[-1] if parts else ''
-            if username and username not in ('twitter','x','share','intent','home','search',''):
-                result['x_link'] = href if href.startswith('http') else f'https://x.com/{username}'
+
+    # Extract name from og:title or page title
+    if HAS_BS4:
+        soup = BeautifulSoup(html, 'html.parser')
+        for prop in ['og:title', 'twitter:title']:
+            tag = soup.find('meta', property=prop) or soup.find('meta', attrs={'name': prop})
+            if tag and tag.get('content'):
+                result['name'] = _clean_name(tag['content'])
                 break
+        if not result['name']:
+            h1 = soup.find('h1')
+            if h1:
+                result['name'] = _clean_name(h1.get_text(strip=True))
+        if not result['name'] and soup.title:
+            result['name'] = _clean_name(soup.title.string or '')
+
+        # Extract social links
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            if ('twitter.com/' in href or 'x.com/' in href) and '/status/' not in href:
+                if not result['x_link']:
+                    result['x_link'] = href
+            elif 'discord.gg' in href or 'discord.com/invite' in href:
+                if not result['discord_link']:
+                    result['discord_link'] = href
+
+    # Try __NEXT_DATA__ for structured data
+    next_data = _extract_next_data(html)
+    if next_data:
+        props = next_data.get('props', {}).get('pageProps', {})
+        claim = props.get('claim') or props.get('instance') or props.get('edition') or {}
+        if isinstance(claim, dict) and claim:
+            logger.info(f"[Manifold] Found claim data in __NEXT_DATA__")
+            result = _parse_manifold_claim(claim, result)
+
+    # Try scanning page for embedded contract addresses and mint data
+    if not result.get('contract'):
+        # Look for 0x addresses in page
+        contracts = re.findall(r'0x[a-fA-F0-9]{40}', html)
+        if contracts:
+            result['contract'] = contracts[0]
+            logger.info(f"[Manifold] Found contract: {result['contract']}")
+
+    # Try extracting price/supply from page text
+    if not result.get('phases'):
+        result = _parse_manifold_from_text(html, result)
+
+    # Detect chain from URL path or page content
+    if '/base/' in url.lower() or 'base' in html.lower()[:3000]:
+        result['chain'] = 'Base'
+    elif '/optimism/' in url.lower():
+        result['chain'] = 'Optimism'
+
+    if result.get('phases'):
+        result['success'] = True
+        logger.info(f"[Manifold] Detected: {result['name']} — {len(result['phases'])} phase(s)")
+    else:
+        result['needs_manual'] = True
+        logger.info(f"[Manifold] No phases found — needs manual entry")
+
+    return result
+
+
+def _parse_manifold_claim(claim: dict, result: dict) -> dict:
+    """Parse Manifold claim/edition object into our standard format."""
+    if claim.get('name'):
+        result['name'] = claim['name']
+    if claim.get('contract') or claim.get('contractAddress'):
+        result['contract'] = claim.get('contract') or claim.get('contractAddress', '')
+
+    # Supply
+    supply = claim.get('totalMax') or claim.get('maxSupply') or claim.get('total') or 0
+    try:
+        result['total_supply'] = int(supply)
+    except (ValueError, TypeError):
+        pass
+
+    # Build phase from claim data
+    price_raw = claim.get('cost') or claim.get('price') or claim.get('mintPrice') or 0
+    price_str = 'Free'
+    try:
+        if isinstance(price_raw, dict):
+            price_str = _format_eth_price(price_raw)
+        else:
+            val = float(price_raw)
+            if val > 1e15:  # Wei value
+                val = val / 1e18
+            price_str = 'Free' if val == 0 else f"{val:.6f}".rstrip('0').rstrip('.') + ' ETH'
+    except (ValueError, TypeError):
+        price_str = str(price_raw) if price_raw else 'Free'
+
+    start_time = parse_any_time(
+        claim.get('startDate') or claim.get('start_date') or
+        claim.get('startTime') or claim.get('saleStart') or ''
+    )
+    end_time = parse_any_time(
+        claim.get('endDate') or claim.get('end_date') or
+        claim.get('endTime') or claim.get('saleEnd') or ''
+    )
+
+    phase_name = claim.get('stageName') or claim.get('phaseName') or 'Mint'
+    result['phases'] = [{
+        'name': phase_name,
+        'time': start_time,
+        'end_time': end_time,
+        'price': price_str,
+        'limit': str(claim.get('walletMax') or claim.get('maxPerWallet') or 'N/A'),
+    }]
+    return result
+
+
+def _parse_manifold_from_text(html: str, result: dict) -> dict:
+    """Fallback: extract mint info from raw page text using keyword scanning."""
+    text = re.sub(r'<[^>]+>', ' ', html)
+    text = re.sub(r'\s+', ' ', text)
+
+    # Price patterns
+    price_m = re.search(r'([\d.]+)\s*(ETH|eth|Ξ)', text)
+    price_str = 'Free'
+    if price_m:
+        val = float(price_m.group(1))
+        price_str = 'Free' if val == 0 else f"{price_m.group(1)} ETH"
+    elif re.search(r'(?i)\bfree\b.*\bmint\b|\bmint\b.*\bfree\b', text):
+        price_str = 'Free'
+
+    # Supply
+    supply_m = re.search(r'(?i)(?:supply|edition|max)\s*[:\s]*(\d{1,6})', text)
+    if supply_m and not result.get('total_supply'):
+        try:
+            result['total_supply'] = int(supply_m.group(1))
+        except ValueError:
+            pass
+
+    # If we found a price, create a basic phase
+    if price_str or re.search(r'(?i)mint\s+now|claim\s+now|mint\s+live', text):
+        now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+        result['phases'] = [{
+            'name': 'Mint',
+            'time': now_str,
+            'end_time': '',
+            'price': price_str,
+            'limit': 'N/A',
+        }]
+
+    return result
+
+
+# ─────────────────────────────────────────────
+# PLATFORM: Highlight
+# ─────────────────────────────────────────────
+
+async def _detect_highlight(url: str) -> dict:
+    """Detect mint data from highlight.xyz pages."""
+    result = _empty_result('Ethereum')
+    logger.info(f"[Highlight] Fetching {url}")
+
+    html = await _get(url, timeout=15)
+    if not html:
+        logger.warning(f"[Highlight] Could not fetch page")
+        return result
+
+    # Name from meta tags
+    if HAS_BS4:
+        soup = BeautifulSoup(html, 'html.parser')
+        for prop in ['og:title', 'twitter:title']:
+            tag = soup.find('meta', property=prop) or soup.find('meta', attrs={'name': prop})
+            if tag and tag.get('content'):
+                result['name'] = _clean_name(tag['content'])
+                break
+        if not result['name'] and soup.title:
+            result['name'] = _clean_name(soup.title.string or '')
+
+        # Social links
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            if ('twitter.com/' in href or 'x.com/' in href) and '/status/' not in href:
+                if not result['x_link']:
+                    result['x_link'] = href
+            elif 'discord.gg' in href or 'discord.com/invite' in href:
+                if not result['discord_link']:
+                    result['discord_link'] = href
+
+    # Try __NEXT_DATA__
+    next_data = _extract_next_data(html)
+    if next_data:
+        props = next_data.get('props', {}).get('pageProps', {})
+        # Highlight stores project data in various keys
+        project = (props.get('collection') or props.get('project') or
+                   props.get('drop') or props.get('mintPage') or {})
+        if isinstance(project, dict) and project:
+            logger.info(f"[Highlight] Found project data in __NEXT_DATA__")
+            result = _parse_highlight_project(project, result)
+
+    # Detect chain from URL or content
+    path = urlparse(url).path.lower()
+    for chain_kw, chain_name in CHAIN_NORMALIZE.items():
+        if f'/{chain_kw}/' in path or f'/{chain_kw}' == path.rstrip('/').rsplit('/', 1)[-1] if '/' in path else False:
+            result['chain'] = chain_name
+            break
+
+    # Contract from page
+    if not result.get('contract'):
+        contracts = re.findall(r'0x[a-fA-F0-9]{40}', html)
+        if contracts:
+            result['contract'] = contracts[0]
+
+    # Fallback: parse from text
+    if not result.get('phases'):
+        result = _parse_generic_text_phases(html, result)
+
+    if result.get('phases'):
+        result['success'] = True
+        logger.info(f"[Highlight] Detected: {result['name']} — {len(result['phases'])} phase(s)")
+    else:
+        result['needs_manual'] = True
+        logger.info(f"[Highlight] No phases found — needs manual entry")
+
+    return result
+
+
+def _parse_highlight_project(project: dict, result: dict) -> dict:
+    """Parse Highlight project data into standard format."""
+    if project.get('name') or project.get('title'):
+        result['name'] = project.get('name') or project.get('title', '')
+
+    if project.get('contractAddress') or project.get('address'):
+        result['contract'] = project.get('contractAddress') or project.get('address', '')
+
+    # Chain
+    chain_raw = project.get('chainId') or project.get('chain') or ''
+    chain_map = {'1': 'Ethereum', '8453': 'Base', '42161': 'Arbitrum',
+                 '10': 'Optimism', '137': 'Polygon', '7777777': 'Zora'}
+    if str(chain_raw) in chain_map:
+        result['chain'] = chain_map[str(chain_raw)]
+    elif isinstance(chain_raw, str) and chain_raw.lower() in CHAIN_NORMALIZE:
+        result['chain'] = CHAIN_NORMALIZE[chain_raw.lower()]
+
+    # Supply
+    supply = project.get('size') or project.get('maxSupply') or project.get('supply') or 0
+    try:
+        result['total_supply'] = int(supply)
+    except (ValueError, TypeError):
+        pass
+
+    # Phases from mintConfigs or stages
+    configs = project.get('mintConfigs') or project.get('stages') or project.get('phases') or []
+    if isinstance(configs, list) and configs:
+        phases = []
+        for cfg in configs:
+            if not isinstance(cfg, dict):
+                continue
+            price_raw = cfg.get('price') or cfg.get('mintPrice') or cfg.get('pricePerToken') or 0
+            price_str = _format_eth_price(price_raw) if isinstance(price_raw, dict) else 'Free'
+            if not isinstance(price_raw, dict):
+                try:
+                    val = float(price_raw)
+                    if val > 1e15:
+                        val = val / 1e18
+                    price_str = 'Free' if val == 0 else f"{val:.6f}".rstrip('0').rstrip('.') + ' ETH'
+                except (ValueError, TypeError):
+                    price_str = str(price_raw) if price_raw else 'Free'
+
+            start = parse_any_time(cfg.get('startTime') or cfg.get('start') or cfg.get('startDate') or '')
+            end = parse_any_time(cfg.get('endTime') or cfg.get('end') or cfg.get('endDate') or '')
+
+            phases.append({
+                'name': cfg.get('name') or cfg.get('stage') or 'Mint',
+                'time': start,
+                'end_time': end,
+                'price': price_str,
+                'limit': str(cfg.get('maxPerWallet') or cfg.get('limit') or 'N/A'),
+            })
+        if phases:
+            result['phases'] = phases
+    elif project.get('mintPrice') or project.get('price'):
+        # Single phase
+        price_raw = project.get('mintPrice') or project.get('price') or 0
+        price_str = 'Free'
+        try:
+            val = float(price_raw)
+            if val > 1e15: val = val / 1e18
+            price_str = 'Free' if val == 0 else f"{val:.6f}".rstrip('0').rstrip('.') + ' ETH'
+        except (ValueError, TypeError):
+            price_str = str(price_raw) if price_raw else 'Free'
+
+        start = parse_any_time(project.get('startTime') or project.get('startDate') or '')
+        result['phases'] = [{
+            'name': 'Mint',
+            'time': start,
+            'end_time': '',
+            'price': price_str,
+            'limit': str(project.get('maxPerWallet') or 'N/A'),
+        }]
+
+    # Social links
+    if project.get('twitter') or project.get('twitterUrl'):
+        result['x_link'] = project.get('twitter') or project.get('twitterUrl', '')
+    if project.get('discord') or project.get('discordUrl'):
+        result['discord_link'] = project.get('discord') or project.get('discordUrl', '')
+
+    return result
+
+
+# ─────────────────────────────────────────────
+# PLATFORM: Scatter
+# ─────────────────────────────────────────────
+
+def _scatter_slug(url: str) -> str:
+    """Extract collection slug from scatter.art URL."""
+    path = urlparse(url).path.rstrip('/')
+    # /collection/slug or /collection/slug/mint
+    m = re.search(r'/collection/([^/?#]+)', path)
+    if m:
+        return m.group(1)
+    # Direct slug in path: scatter.art/slug
+    parts = [p for p in path.split('/') if p]
+    if parts and parts[0] not in ('collection', 'explore', 'create', 'profile', 'settings'):
+        return parts[0]
+    return ''
+
+
+async def _detect_scatter(url: str) -> dict:
+    """Detect mint data from scatter.art using their public API."""
+    result = _empty_result('Ethereum')
+    slug = _scatter_slug(url)
+    if not slug:
+        logger.warning(f"[Scatter] Could not extract slug from {url}")
+        # Fallback to generic HTML parsing
+        return await _detect_generic(url)
+
+    logger.info(f"[Scatter] Fetching collection data for slug={slug}")
+
+    # Fetch collection info via Scatter API
+    col_data = await _get(
+        f"https://api.scatter.art/v1/collection/{slug}",
+        as_json=True, timeout=10
+    )
+
+    if not col_data or not isinstance(col_data, dict):
+        logger.warning(f"[Scatter] API returned no data for {slug}")
+        return await _detect_generic(url)
+
+    # Parse collection data
+    result['name'] = col_data.get('name') or slug.replace('-', ' ').title()
+
+    chain_id = str(col_data.get('chainId') or '1')
+    chain_map = {'1': 'Ethereum', '8453': 'Base', '42161': 'Arbitrum',
+                 '10': 'Optimism', '137': 'Polygon', '56': 'BNB',
+                 '43114': 'Avalanche', '81457': 'Blast'}
+    result['chain'] = chain_map.get(chain_id, 'Ethereum')
+
+    result['contract'] = col_data.get('address') or col_data.get('contractAddress') or ''
+
+    supply = col_data.get('maxSupply') or col_data.get('supply') or 0
+    try:
+        result['total_supply'] = int(supply)
+    except (ValueError, TypeError):
+        pass
+
+    if col_data.get('twitter'):
+        result['x_link'] = col_data['twitter']
+    if col_data.get('discord'):
+        result['discord_link'] = col_data['discord']
+
+    # Fetch mint lists (phases) — public lists available without wallet
+    lists_data = await _get(
+        f"https://api.scatter.art/v1/collection/{slug}/eligible-invite-lists",
+        as_json=True, timeout=10
+    )
+
+    if lists_data and isinstance(lists_data, list):
+        phases = []
+        for lst in lists_data:
+            if not isinstance(lst, dict):
+                continue
+            price_raw = lst.get('price') or lst.get('mintPrice') or 0
+            price_str = 'Free'
+            try:
+                val = float(price_raw)
+                if val > 1e15: val = val / 1e18
+                price_str = 'Free' if val == 0 else f"{val:.6f}".rstrip('0').rstrip('.') + ' ETH'
+            except (ValueError, TypeError):
+                price_str = str(price_raw) if price_raw else 'Free'
+
+            start = parse_any_time(lst.get('startTime') or lst.get('start') or '')
+            end = parse_any_time(lst.get('endTime') or lst.get('end') or '')
+
+            phases.append({
+                'name': lst.get('name') or lst.get('listName') or 'Mint',
+                'time': start,
+                'end_time': end,
+                'price': price_str,
+                'limit': str(lst.get('maxPerWallet') or lst.get('limit') or 'N/A'),
+            })
+        if phases:
+            result['phases'] = phases
+
+    # If no phases from lists, try getting basic price as single phase
+    if not result.get('phases'):
+        price = col_data.get('tokenPrice') or col_data.get('price') or 0
+        price_str = 'Free'
+        try:
+            val = float(price)
+            if val > 1e15: val = val / 1e18
+            price_str = 'Free' if val == 0 else f"{val:.6f}".rstrip('0').rstrip('.') + ' ETH'
+        except (ValueError, TypeError):
+            pass
+        if price_str:
+            result['phases'] = [{
+                'name': 'Public',
+                'time': '',
+                'end_time': '',
+                'price': price_str,
+                'limit': 'N/A',
+            }]
+
+    if result.get('phases'):
+        result['success'] = True
+        logger.info(f"[Scatter] Detected: {result['name']} — {len(result['phases'])} phase(s)")
+    else:
+        result['needs_manual'] = True
+        logger.info(f"[Scatter] No phases found — needs manual entry")
+
+    return result
+
+
+# ─────────────────────────────────────────────
+# PLATFORM: LaunchMyNFT
+# ─────────────────────────────────────────────
+
+async def _detect_launchmynft(url: str) -> dict:
+    """Detect mint data from launchmynft.io pages."""
+    result = _empty_result('Ethereum')
+    logger.info(f"[LaunchMyNFT] Fetching {url}")
+
+    html = await _get(url, timeout=15)
+    if not html:
+        logger.warning(f"[LaunchMyNFT] Could not fetch page")
+        return result
+
+    # Name from meta tags
+    if HAS_BS4:
+        soup = BeautifulSoup(html, 'html.parser')
+        for prop in ['og:title', 'twitter:title']:
+            tag = soup.find('meta', property=prop) or soup.find('meta', attrs={'name': prop})
+            if tag and tag.get('content'):
+                result['name'] = _clean_name(tag['content'])
+                break
+        if not result['name'] and soup.title:
+            result['name'] = _clean_name(soup.title.string or '')
+
+    # Try __NEXT_DATA__
+    next_data = _extract_next_data(html)
+    if next_data:
+        props = next_data.get('props', {}).get('pageProps', {})
+        collection = props.get('collection') or props.get('project') or props.get('mint') or {}
+        if isinstance(collection, dict) and collection:
+            logger.info(f"[LaunchMyNFT] Found collection data in __NEXT_DATA__")
+            if collection.get('name'):
+                result['name'] = collection['name']
+            if collection.get('contractAddress') or collection.get('address'):
+                result['contract'] = collection.get('contractAddress') or collection.get('address', '')
+
+            supply = collection.get('maxSupply') or collection.get('supply') or collection.get('size') or 0
+            try:
+                result['total_supply'] = int(supply)
+            except (ValueError, TypeError):
+                pass
+
+            # Chain detection
+            chain_raw = collection.get('blockchain') or collection.get('chain') or collection.get('network') or ''
+            if isinstance(chain_raw, str) and chain_raw.lower() in CHAIN_NORMALIZE:
+                result['chain'] = CHAIN_NORMALIZE[chain_raw.lower()]
+
+            # Price
+            price_raw = collection.get('price') or collection.get('mintPrice') or collection.get('publicPrice') or 0
+            price_str = 'Free'
+            try:
+                val = float(price_raw)
+                if val > 1e15: val = val / 1e18
+                price_str = 'Free' if val == 0 else f"{val:.6f}".rstrip('0').rstrip('.') + ' ETH'
+            except (ValueError, TypeError):
+                price_str = str(price_raw) if price_raw else 'Free'
+
+            start = parse_any_time(collection.get('launchDate') or collection.get('startDate') or
+                                   collection.get('saleStart') or '')
+
+            result['phases'] = [{
+                'name': 'Mint',
+                'time': start,
+                'end_time': '',
+                'price': price_str,
+                'limit': str(collection.get('maxPerWallet') or collection.get('maxMint') or 'N/A'),
+            }]
+
+    # Fallback: scan embedded JSON in page
+    if not result.get('phases'):
+        # LaunchMyNFT embeds config in script tags
+        for m in re.finditer(r'<script[^>]*>(.*?)</script>', html, re.DOTALL):
+            script = m.group(1)
+            # Look for JSON with mint-related keys
+            json_m = re.search(r'\{[^{}]*"(?:mintPrice|price|maxSupply)"[^{}]*\}', script)
+            if json_m:
+                try:
+                    obj = json.loads(json_m.group(0))
+                    price = obj.get('mintPrice') or obj.get('price') or 0
+                    try:
+                        val = float(price)
+                        if val > 1e15: val = val / 1e18
+                        p_str = 'Free' if val == 0 else f"{val:.6f}".rstrip('0').rstrip('.') + ' ETH'
+                    except (ValueError, TypeError):
+                        p_str = 'Free'
+
+                    result['phases'] = [{'name': 'Mint', 'time': '', 'end_time': '',
+                                         'price': p_str, 'limit': 'N/A'}]
+                    if obj.get('maxSupply'):
+                        result['total_supply'] = int(obj['maxSupply'])
+                    break
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+    # Contract from page
+    if not result.get('contract'):
+        contracts = re.findall(r'0x[a-fA-F0-9]{40}', html)
+        if contracts:
+            result['contract'] = contracts[0]
+
+    if not result.get('phases'):
+        result = _parse_generic_text_phases(html, result)
+
+    if result.get('phases'):
+        result['success'] = True
+        logger.info(f"[LaunchMyNFT] Detected: {result['name']} — {len(result['phases'])} phase(s)")
+    else:
+        result['needs_manual'] = True
+        logger.info(f"[LaunchMyNFT] No phases found — needs manual entry")
+
+    return result
+
+
+# ─────────────────────────────────────────────
+# PLATFORM: Generic (any mint site)
+# ─────────────────────────────────────────────
+
+async def _detect_generic(url: str) -> dict:
+    """Generic mint site detection — HTML parsing + keyword scanning + Playwright fallback."""
+    result = _empty_result(detect_chain(url))
+    logger.info(f"[Generic] Fetching {url}")
+
+    html = await _get(url, timeout=10)
+    if html and HAS_BS4:
+        soup = BeautifulSoup(html, 'html.parser')
+
+        # Name extraction
+        for prop in ['og:title', 'twitter:title']:
+            tag = soup.find('meta', property=prop) or soup.find('meta', attrs={'name': prop})
+            if tag and tag.get('content'):
+                result['name'] = _clean_name(tag['content'])
+                break
+        if not result['name']:
+            h1 = soup.find('h1')
+            if h1:
+                result['name'] = _clean_name(h1.get_text(strip=True))
+        if not result['name'] and soup.title:
+            result['name'] = _clean_name(soup.title.string or '')
+
+        # Social links
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            if ('twitter.com/' in href or 'x.com/' in href) and '/status/' not in href:
+                parts = href.rstrip('/').split('/')
+                username = parts[-1] if parts else ''
+                if username and username not in ('twitter','x','share','intent','home','search',''):
+                    result['x_link'] = href if href.startswith('http') else f'https://x.com/{username}'
+                    break
+
+        # Contract from page
+        if not result.get('contract'):
+            contracts = re.findall(r'0x[a-fA-F0-9]{40}', html)
+            if contracts:
+                result['contract'] = contracts[0]
+
+        # Try __NEXT_DATA__
+        next_data = _extract_next_data(html)
+        if next_data:
+            props = next_data.get('props', {}).get('pageProps', {})
+            # Generic deep scan for mint-related data
+            result = _scan_dict_for_mint_data(props, result)
+
+        # Keyword-based phase extraction from text
+        if not result.get('phases') and html:
+            result = _parse_generic_text_phases(html, result)
+
+    # If still no phases — try Playwright as last resort
+    if not result.get('phases'):
+        logger.info(f"[Generic] No phases from HTML — trying Playwright fallback")
+        pw_result = await _run_with_timeout(_detect_via_playwright(url), 50, "playwright_generic")
+        if pw_result and pw_result.get('phases'):
+            result['phases'] = pw_result['phases']
+            result['success'] = True
+            if pw_result.get('name') and not result['name']:
+                result['name'] = pw_result['name']
+            logger.info(f"[Generic] Playwright found {len(result['phases'])} phase(s)")
+            return result
+
+    if result.get('phases'):
+        result['success'] = True
+        logger.info(f"[Generic] Detected: {result['name']} — {len(result['phases'])} phase(s)")
+    else:
+        result['needs_manual'] = True
+        logger.info(f"[Generic] No phases found — needs manual entry")
+
+    return result
+
+
+def _empty_result(chain: str = 'Ethereum') -> dict:
+    """Create an empty result dict with sensible defaults."""
+    return {
+        'name': '', 'chain': chain, 'contract': '',
+        'x_link': '', 'discord_link': '', 'total_supply': 0,
+        'phases': [], 'success': False, 'needs_manual': True,
+    }
+
+
+def _scan_dict_for_mint_data(data: dict, result: dict, depth: int = 0) -> dict:
+    """Recursively scan a dict for mint-related fields (price, supply, startTime)."""
+    if depth > 5 or not isinstance(data, dict):
+        return result
+    # Check if this dict has mint-related keys
+    mint_keys = {'mintPrice', 'price', 'maxSupply', 'supply', 'startTime', 'startDate',
+                 'saleStart', 'mint_price', 'start_time', 'total_supply'}
+    found_keys = set(data.keys()) & mint_keys
+    if len(found_keys) >= 2:
+        price_raw = data.get('mintPrice') or data.get('price') or data.get('mint_price') or 0
+        price_str = 'Free'
+        try:
+            val = float(price_raw)
+            if val > 1e15: val = val / 1e18
+            price_str = 'Free' if val == 0 else f"{val:.6f}".rstrip('0').rstrip('.') + ' ETH'
+        except (ValueError, TypeError):
+            pass
+
+        start = parse_any_time(data.get('startTime') or data.get('startDate') or
+                               data.get('saleStart') or data.get('start_time') or '')
+
+        supply = data.get('maxSupply') or data.get('supply') or data.get('total_supply') or 0
+        try:
+            result['total_supply'] = int(supply)
+        except (ValueError, TypeError):
+            pass
+
+        if data.get('name') and not result['name']:
+            result['name'] = str(data['name'])
+        if data.get('contractAddress') and not result.get('contract'):
+            result['contract'] = data['contractAddress']
+
+        result['phases'] = [{
+            'name': str(data.get('stageName') or data.get('phaseName') or 'Mint'),
+            'time': start,
+            'end_time': '',
+            'price': price_str,
+            'limit': str(data.get('maxPerWallet') or 'N/A'),
+        }]
+        return result
+
+    # Recurse into child dicts
+    for v in data.values():
+        if isinstance(v, dict):
+            result = _scan_dict_for_mint_data(v, result, depth + 1)
+            if result.get('phases'):
+                return result
+        elif isinstance(v, list):
+            for item in v[:5]:
+                if isinstance(item, dict):
+                    result = _scan_dict_for_mint_data(item, result, depth + 1)
+                    if result.get('phases'):
+                        return result
+    return result
+
+
+def _parse_generic_text_phases(html: str, result: dict) -> dict:
+    """Extract mint phases from raw HTML text using keyword scanning."""
+    text = re.sub(r'<[^>]+>', ' ', html)
+    text = re.sub(r'\s+', ' ', text)
+
+    # Check for mint-related keywords
+    mint_keywords = ['mint', 'public sale', 'whitelist', 'presale', 'allowlist',
+                     'claim', 'price', 'supply']
+    has_mint_content = any(kw in text.lower() for kw in mint_keywords)
+    if not has_mint_content:
+        return result
+
+    # Price extraction
+    price_m = re.search(r'(?:mint\s+)?(?:price|cost)[:\s]*([\d.]+)\s*(ETH|eth|Ξ|SOL|sol)', text, re.IGNORECASE)
+    if not price_m:
+        price_m = re.search(r'([\d.]+)\s*(ETH|eth|Ξ)\s*(?:per|each|/)', text)
+    price_str = 'Free'
+    if price_m:
+        val = float(price_m.group(1))
+        cur = price_m.group(2).upper().replace('Ξ', 'ETH')
+        price_str = 'Free' if val == 0 else f"{price_m.group(1)} {cur}"
+    elif re.search(r'(?i)\bfree\s+mint\b|\bmint\s+free\b|\bfree\s+claim\b', text):
+        price_str = 'Free'
+
+    # Supply
+    supply_m = re.search(r'(?i)(?:total\s+)?supply[:\s]*(\d{1,6})', text)
+    if supply_m and not result.get('total_supply'):
+        try:
+            result['total_supply'] = int(supply_m.group(1))
+        except ValueError:
+            pass
+
+    # Time extraction
+    time_str = ''
+    # Look for explicit date patterns near mint keywords
+    time_m = re.search(
+        r'(?:mint|sale|launch|starts?)[:\s]*(\d{4}[-/]\d{2}[-/]\d{2}[\sT]\d{2}:\d{2})',
+        text, re.IGNORECASE
+    )
+    if time_m:
+        time_str = iso_to_str(time_m.group(1))
+
+    # Build phase if we have enough info
+    if price_str or time_str:
+        result['phases'] = [{
+            'name': 'Mint',
+            'time': time_str,
+            'end_time': '',
+            'price': price_str,
+            'limit': 'N/A',
+        }]
+
     return result
 
 # ─────────────────────────────────────────────
@@ -855,22 +1622,40 @@ async def get_recent_sales_count(mint: dict, window_seconds: int = 60) -> int | 
 # ─────────────────────────────────────────────
 
 ETHERSCAN_CHAIN_IDS = {
-    'ethereum': '1',
-    'eth':      '1',
-    'base':     '8453',
-    'polygon':  '137',
-    'matic':    '137',
-    'arbitrum': '42161',
-    'optimism': '10',
-    'blast':    '81457',
-    'linea':    '59144',
-    'scroll':   '534352',
-    'bnb':      '56',
-    'bsc':      '56',
-    'avalanche':'43114',
-    'avax':     '43114',
+    # ── Major L1s ──
+    'ethereum':  '1',
+    'eth':       '1',
+    'bnb':       '56',
+    'bsc':       '56',
+    'polygon':   '137',
+    'matic':     '137',
+    'avalanche': '43114',
+    'avax':      '43114',
+    'sonic':     '146',
+    'fantom':    '146',       # Sonic replaced Fantom
+    # ── L2s ──
+    'base':      '8453',
+    'arbitrum':  '42161',
+    'optimism':  '10',
+    'blast':     '81457',
+    'linea':     '59144',
+    'scroll':    '534352',
+    'abstract':  '2741',      # now on Etherscan V2 (was separate abscan)
+    'mantle':    '5000',
+    'taiko':     '167000',
+    'unichain':  '130',
+    'opbnb':     '204',
+    # ── App-chains ──
+    'apechain':  '33139',
+    'berachain': '80094',
+    'bera':      '80094',
+    'worldchain':'480',
+    'world':     '480',
+    'celo':      '42220',
+    'gnosis':    '100',
+    'moonbeam':  '1284',
+    'moonriver': '1285',
     # MegaETH mainnet — chain ID 4326, uses direct RPC (not on Etherscan V2 yet)
-    # Abstract mainnet — uses abscan.org (not Etherscan V2)
     # Solana — uses Helius/public RPC (not EVM)
 }
 ETHERSCAN_V2_URL = 'https://api.etherscan.io/v2/api'
@@ -918,10 +1703,11 @@ async def get_minted_count(mint: dict) -> int | None:
     """
     Get current minted count for a mint.
     Priority:
-      1. Etherscan V2 (Ethereum, Base, Polygon, Arbitrum, Optimism, Blast, Linea, Scroll, BNB, Avalanche)
-      2. Abscan (Abstract chain)
-      3. Helius RPC (Solana)
-      4. OpenSea drops API fallback
+      1. Etherscan V2 (all EVM chains — ETH, Base, Arbitrum, Abstract, Bera, etc.)
+      2. Abscan fallback (Abstract chain — if no Etherscan key)
+      3. MegaETH direct RPC
+      4. Solana Helius/public RPC
+      5. OpenSea drops API fallback (any chain on OpenSea)
     """
     import os
 
@@ -1012,7 +1798,7 @@ async def get_minted_count(mint: dict) -> int | None:
         except Exception as e:
             logger.warning(f"[minted] Solana RPC error for {mint.get('name')}: {e}")
 
-    # ── 4. OpenSea drops API fallback ──
+    # ── 5. OpenSea drops API fallback ──
     mint_link = (mint.get('os_link') or mint.get('mint_link') or '').strip()
     slug = _opensea_slug(mint_link)
     if slug:
