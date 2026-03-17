@@ -151,16 +151,10 @@ function mergeDetectionResults({ launchpad, osDrop, osCollection, browser, mintU
 async function scrapeBrowserPhases(url) {
   try {
     const isOpenSea = url.toLowerCase().includes('opensea.io');
-
-    if (isOpenSea) {
-      return scrapeOpenSeaPage(url);
-    }
+    if (isOpenSea) return scrapeOpenSeaPage(url);
 
     // Generic page scrape for phase data
-    const { text } = await scrapeUrl(url, {
-      waitMs: 4000,
-      timeout: 40000,
-    });
+    const { text } = await scrapeUrl(url, { waitMs: 4000, timeout: 40000 });
     return parseGenericPageText(text);
   } catch (err) {
     logger.debug(`Browser scrape failed for ${url}: ${err.message}`);
@@ -169,45 +163,150 @@ async function scrapeBrowserPhases(url) {
 }
 
 /**
- * Scrape OpenSea collection/drop page for phase schedule.
+ * Scrape OpenSea collection/drop page.
  *
- * Strategy: poll the page text every 2 s for up to 25 s, stopping as soon
- * as we find a month name (dates loaded) or a price pattern. This avoids
- * waiting the full 50 s when the drop data never appears.
+ * Three-pass strategy (most reliable → least):
+ *   1. window.__NEXT_DATA__  — Next.js SSR payload, available immediately
+ *   2. Intercepted XHR/fetch — OpenSea's own internal API calls
+ *   3. innerText parsing     — last resort, requires visible text
  */
 async function scrapeOpenSeaPage(url) {
-  const TOTAL_TIMEOUT = 25000;   // hard cap — well below Python's 50 s
-  const POLL_INTERVAL = 2000;
-
   return scrapeWithCallback(url, async (page) => {
-    const MONTHS_RE = /January|February|March|April|May|June|July|August|September|October|November|December/;
-    const PRICE_RE  = /\d+\.?\d*\s*(ETH|SOL|MATIC|BNB)/i;
-    const MINT_RE   = /[Mm]inting\s+in\s+\d+/;
+    // Collect intercepted API responses that contain drop/stage data
+    const intercepted = [];
 
-    const deadline = Date.now() + TOTAL_TIMEOUT;
-    let text = '';
+    // Must set up interception BEFORE goto
+    await page.setRequestInterception(true);
+    page.on('request', req => req.continue().catch(() => {}));
+    page.on('response', async resp => {
+      try {
+        const respUrl = resp.url();
+        if (
+          respUrl.includes('api.opensea.io') ||
+          respUrl.includes('/graphql') ||
+          respUrl.includes('/drops/') ||
+          respUrl.includes('/collections/')
+        ) {
+          const ct = resp.headers()['content-type'] || '';
+          if (ct.includes('json')) {
+            const body = await resp.json().catch(() => null);
+            if (body) intercepted.push(body);
+          }
+        }
+      } catch {}
+    });
 
-    while (Date.now() < deadline) {
-      text = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+    // Navigate here (not in scrapeWithCallback) so interception is already active
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
 
-      if (MONTHS_RE.test(text) || PRICE_RE.test(text) || MINT_RE.test(text)) {
-        logger.debug(`OpenSea page settled after ${TOTAL_TIMEOUT - (deadline - Date.now())}ms`);
-        break;
+    // ── Pass 1: __NEXT_DATA__ ──────────────────────────────────────────────
+    const nextData = await page.evaluate(() => {
+      try {
+        const el = document.getElementById('__NEXT_DATA__');
+        return el ? JSON.parse(el.textContent) : null;
+      } catch { return null; }
+    }).catch(() => null);
+
+    if (nextData) {
+      const result = parseNextData(nextData);
+      if (result && result.phases.length > 0) {
+        logger.info(`OpenSea __NEXT_DATA__ found ${result.phases.length} phase(s) for ${url}`);
+        return result;
       }
-
-      // Also check for "no drop" signals — exit early rather than timing out
-      if (/404|not found|page not available/i.test(text) && text.length > 200) {
-        logger.debug(`OpenSea page returned 404/not-found content for ${url}`);
-        break;
-      }
-
-      await new Promise(r => setTimeout(r, POLL_INTERVAL));
     }
 
+    // ── Pass 2: wait up to 8 s more for XHR responses then check them ─────
+    await new Promise(r => setTimeout(r, 8000));
+
+    for (const body of intercepted) {
+      const result = parseOpenSeaApiBody(body);
+      if (result && result.phases.length > 0) {
+        logger.info(`OpenSea XHR intercept found ${result.phases.length} phase(s) for ${url}`);
+        return result;
+      }
+    }
+
+    // ── Pass 3: innerText fallback ─────────────────────────────────────────
+    const text = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
     const result = parseOpenSeaPageText(text);
     result.text = text;
+    if (result.phases.length > 0) {
+      logger.info(`OpenSea text parse found ${result.phases.length} phase(s) for ${url}`);
+    } else {
+      logger.debug(`OpenSea scrape: no phases found for ${url}`);
+    }
     return result;
-  }, TOTAL_TIMEOUT + 5000); // scrapeWithCallback outer timeout = 30 s
+
+  }, 35000, { navigate: false });
+}
+
+/**
+ * Extract phase data from window.__NEXT_DATA__.
+ *
+ * OpenSea embeds the drop/collection state in the Next.js SSR props under
+ * several possible key paths depending on page type.
+ */
+function parseNextData(data) {
+  const phases = [];
+  let name = null, chain = null, contract = null, total_supply = null, minted = 0;
+
+  // Walk the props tree looking for drop/mint stage structures
+  function walk(obj, depth = 0) {
+    if (!obj || typeof obj !== 'object' || depth > 12) return;
+
+    // Direct mint_stages / stages array
+    const stageList = obj.mint_stages || obj.mintStages || obj.stages ||
+                      obj.dropStages || obj.mintPhases || obj.phases;
+    if (Array.isArray(stageList) && stageList.length > 0) {
+      for (const s of stageList) {
+        const time = s.startTime || s.start_time || s.startTimestamp || s.mintStartTime;
+        const endTime = s.endTime || s.end_time;
+        const price = s.price?.amount ?? s.mintPrice ?? s.price ?? s.cost;
+        const limit = s.limit ?? s.walletLimit ?? s.maxPerWallet ?? s.limitPerWallet;
+        phases.push({
+          name: s.name || s.stageName || s.label || 'Mint',
+          time: time ? new Date(typeof time === 'number' ? time * 1000 : time).toISOString() : null,
+          end_time: endTime ? new Date(typeof endTime === 'number' ? endTime * 1000 : endTime).toISOString() : null,
+          price: normalizePriceStr(price),
+          limit: limit ?? null,
+        });
+      }
+      return; // found what we need
+    }
+
+    // Grab collection metadata opportunistically
+    if (!name && (obj.name || obj.collectionName)) name = obj.name || obj.collectionName;
+    if (!contract && obj.contractAddress) contract = obj.contractAddress;
+    if (!total_supply && obj.totalSupply) total_supply = Number(obj.totalSupply);
+    if (!minted && obj.mintedItemCount) minted = Number(obj.mintedItemCount);
+    if (!chain && obj.chain) chain = obj.chain;
+
+    for (const v of Object.values(obj)) {
+      if (v && typeof v === 'object') walk(v, depth + 1);
+    }
+  }
+
+  walk(data?.props ?? data);
+
+  if (phases.length === 0) return null;
+  return { phases, name, chain, contract, total_supply, minted };
+}
+
+/**
+ * Parse a captured OpenSea API/GraphQL JSON body for phase data.
+ */
+function parseOpenSeaApiBody(body) {
+  if (!body) return null;
+
+  // Try the same recursive walk used for __NEXT_DATA__
+  const result = parseNextData(body);
+  if (result) return result;
+
+  // GraphQL response shape: { data: { drop: { ... } } }
+  const drop = body?.data?.drop || body?.data?.collection || body?.drop || body?.collection;
+  if (drop) return parseNextData(drop);
+
+  return null;
 }
 
 /**

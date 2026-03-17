@@ -182,14 +182,25 @@ async function scrapeUrl(url, options = {}) {
 
 /**
  * Execute a scrape with a custom page callback (for complex interactions).
+ *
+ * @param {string}   url
+ * @param {Function} callback  - receives (page, browser). If callback calls
+ *                               page.goto() itself, pass navigate:false.
+ * @param {number}   timeout
+ * @param {object}   opts
+ * @param {boolean}  opts.navigate - set false to skip the built-in goto so
+ *                                   the callback can set up interception first
  */
-async function scrapeWithCallback(url, callback, timeout = 50000) {
+async function scrapeWithCallback(url, callback, timeout = 50000, opts = {}) {
+  const { navigate = true } = opts;
   const browser = await launchBrowser();
   const page = await createStealthPage(browser);
 
   try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
-    await randomDelay(500, 1200);
+    if (navigate) {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
+      await randomDelay(500, 1200);
+    }
     const result = await callback(page, browser);
     return result;
   } finally {
