@@ -1,11 +1,10 @@
 [build]
 builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "python bot.py"
 restartPolicyType = "ON_FAILURE"
-restartPolicyMaxRetries = 3
+restartPolicyMaxRetries = 10
 
-# IMPORTANT: Add a Volume in Railway dashboard
-# Mount Path: /data
-# Then add env var: DATABASE_PATH=/data/mints.db
+[[mounts]]
+mountPath = "/data"
