@@ -49,8 +49,13 @@ async function getTotalSupply(contractAddress, chain) {
       const url = `${network.explorerApi}?chainid=${chainId}&module=proxy&action=eth_call` +
         `&to=${contractAddress}&data=${TOTAL_SUPPLY_SELECTOR}&tag=latest&apikey=${etherscanKey}`;
       const resp = await axios.get(url, { timeout: 8000 });
-      if (resp.data?.result && resp.data.result !== '0x') {
-        const supply = parseInt(resp.data.result, 16);
+      const result = resp.data?.result;
+
+      // Detect "Free API access not supported for this chain" — skip to RPC
+      if (typeof result === 'string' && result.startsWith('Free API')) {
+        logger.debug(`Etherscan free plan doesn't cover chain ${chainId} (${chain}), falling back to RPC`);
+      } else if (result && result !== '0x') {
+        const supply = parseInt(result, 16);
         if (!isNaN(supply)) return supply;
       }
     } catch (err) {

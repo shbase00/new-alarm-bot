@@ -170,25 +170,44 @@ async function scrapeBrowserPhases(url) {
 
 /**
  * Scrape OpenSea collection/drop page for phase schedule.
+ *
+ * Strategy: poll the page text every 2 s for up to 25 s, stopping as soon
+ * as we find a month name (dates loaded) or a price pattern. This avoids
+ * waiting the full 50 s when the drop data never appears.
  */
 async function scrapeOpenSeaPage(url) {
-  return scrapeWithCallback(url, async (page) => {
-    // Wait for mint schedule section or page to settle
-    const timeout = 30000;
-    const settled = await Promise.race([
-      page.waitForSelector('[data-testid="drop-details"], .MintSchedule, [class*="MintSchedule"]', { timeout }).catch(() => null),
-      page.waitForFunction(
-        () => document.body.innerText.match(/January|February|March|April|May|June|July|August|September|October|November|December/),
-        { timeout }
-      ).catch(() => null),
-      new Promise(r => setTimeout(r, timeout)),
-    ]);
+  const TOTAL_TIMEOUT = 25000;   // hard cap — well below Python's 50 s
+  const POLL_INTERVAL = 2000;
 
-    const text = await page.evaluate(() => document.body?.innerText || '');
+  return scrapeWithCallback(url, async (page) => {
+    const MONTHS_RE = /January|February|March|April|May|June|July|August|September|October|November|December/;
+    const PRICE_RE  = /\d+\.?\d*\s*(ETH|SOL|MATIC|BNB)/i;
+    const MINT_RE   = /[Mm]inting\s+in\s+\d+/;
+
+    const deadline = Date.now() + TOTAL_TIMEOUT;
+    let text = '';
+
+    while (Date.now() < deadline) {
+      text = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+
+      if (MONTHS_RE.test(text) || PRICE_RE.test(text) || MINT_RE.test(text)) {
+        logger.debug(`OpenSea page settled after ${TOTAL_TIMEOUT - (deadline - Date.now())}ms`);
+        break;
+      }
+
+      // Also check for "no drop" signals — exit early rather than timing out
+      if (/404|not found|page not available/i.test(text) && text.length > 200) {
+        logger.debug(`OpenSea page returned 404/not-found content for ${url}`);
+        break;
+      }
+
+      await new Promise(r => setTimeout(r, POLL_INTERVAL));
+    }
+
     const result = parseOpenSeaPageText(text);
     result.text = text;
     return result;
-  });
+  }, TOTAL_TIMEOUT + 5000); // scrapeWithCallback outer timeout = 30 s
 }
 
 /**
