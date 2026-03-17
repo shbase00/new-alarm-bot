@@ -1,0 +1,31 @@
+{
+  "name": "nft-mint-alarm-bot",
+  "version": "1.0.0",
+  "description": "NFT Mint Alarm Telegram Bot - Node.js implementation",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "rebrowser-puppeteer-core": "^24.8.1",
+    "chrome-launcher": "^1.1.2",
+    "ethers": "^6.13.4",
+    "axios": "^1.7.9",
+    "better-sqlite3": "^11.5.0",
+    "node-cron": "^3.0.3",
+    "dotenv": "^16.4.7",
+    "winston": "^3.17.0",
+    "dayjs": "^1.11.13",
+    "p-queue": "^8.0.1",
+    "bottleneck": "^2.19.5",
+    "cheerio": "^1.0.0",
+    "user-agents": "^1.1.439"
+  },
+  "devDependencies": {},
+  "license": "MIT"
+}
