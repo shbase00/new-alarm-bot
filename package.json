@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "telegraf": "^4.16.3",
-    "rebrowser-puppeteer-core": "^23.11.1",
+    "rebrowser-puppeteer-core": "^24.8.1",
     "chrome-launcher": "^1.1.2",
     "ethers": "^6.13.4",
     "axios": "^1.7.9",
