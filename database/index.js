@@ -47,7 +47,8 @@ function runMigrations() {
       total_supply  INTEGER,
       minted        INTEGER DEFAULT 0,
       market_links  TEXT NOT NULL DEFAULT '{}',
-      fast_mint_alerted INTEGER NOT NULL DEFAULT 0
+      fast_mint_alerted INTEGER NOT NULL DEFAULT 0,
+      platform      TEXT
     );
 
     CREATE TABLE IF NOT EXISTS sent_alerts (
@@ -100,6 +101,7 @@ function runMigrations() {
   addColumnIfMissing('mints', 'total_supply', 'INTEGER');
   addColumnIfMissing('mints', 'contract', 'TEXT');
   addColumnIfMissing('mints', 'discord_link', 'TEXT');
+  addColumnIfMissing('mints', 'platform', 'TEXT');
 }
 
 module.exports = { initDb, getDb };

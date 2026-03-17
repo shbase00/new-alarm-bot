@@ -3,18 +3,23 @@
 /**
  * Multi-layer detection pipeline for NFT mint data.
  *
- * Layer 1: Launchpad-specific APIs (Foundation, Highlight, Manifold, MagicEden, Zora, Sound, LaunchMyNFT)
- * Layer 2: OpenSea Drops API (phases & supply)
- * Layer 3: OpenSea Collections API (metadata & floor)
- * Layer 4: Stealth browser scraping (JS-rendered pages)
- * Layer 5: Smart contract monitoring (totalSupply via ethers.js)
- * Layer 6: Fallback / manual
+ * Layer 1: Platform-specific APIs  (platforms/ — OpenSea, Manifold, Highlight, MagicEden,
+ *                                    Zora, Sound, LaunchMyNFT, Scatter, Foundation)
+ * Layer 2: OpenSea Drops API        (phases & supply — redundancy for OS URLs)
+ * Layer 3: OpenSea Collections API  (metadata & floor — redundancy for OS URLs)
+ * Layer 4: Stealth browser scraping (JS-rendered pages, /overview polling)
+ * Layer 5: Smart contract monitoring (totalSupply — handled in jobs/alerts)
+ * Layer 6: Fallback / manual entry
+ *
+ * All layer outputs are normalized through utils/model.js before merging so
+ * field-name differences across platforms never break the merge step.
  */
 
 const { fetchCollectionData, fetchDropData, buildMarketLinks } = require('./opensea');
-const { scrapeByPlatform } = require('./launchpad');
+const { scrapeByPlatform, detectPlatform } = require('../platforms');
 const { scrapeUrl, scrapeWithCallback } = require('./browser');
-const { extractOpenSeaSlug, extractPlatform, detectChainFromUrl, detectChainFromText, parseTime, normalizePriceStr } = require('../utils/parser');
+const { extractOpenSeaSlug, extractPlatform: extractPlatformHost, detectChainFromUrl, detectChainFromText, parseTime, normalizePriceStr } = require('../utils/parser');
+const { normalizeMintData, deduplicatePhases } = require('../utils/model');
 const logger = require('../utils/logger');
 
 /**
@@ -25,14 +30,14 @@ async function detectMint(mintUrl) {
   logger.info(`Starting multi-layer detection for ${mintUrl}`);
 
   const slug = extractOpenSeaSlug(mintUrl);
-  const platform = extractPlatform(mintUrl);
+  const platform = detectPlatform(mintUrl);
 
   // Run all layers concurrently
-  const [launchpadResult, osDropResult, osCollectionResult, browserResult] = await Promise.allSettled([
-    // Layer 1: Platform-specific launchpad API
+  const [platformResult, osDropResult, osCollectionResult, browserResult] = await Promise.allSettled([
+    // Layer 1: Platform-specific API (platforms/ module — normalized output)
     scrapeByPlatform(mintUrl),
 
-    // Layer 2: OpenSea Drops API
+    // Layer 2: OpenSea Drops API (redundant for OS URLs; harmless no-op for others)
     slug ? fetchDropData(slug) : Promise.resolve(null),
 
     // Layer 3: OpenSea Collections API
@@ -42,15 +47,18 @@ async function detectMint(mintUrl) {
     scrapeBrowserPhases(mintUrl),
   ]);
 
-  const launchpad = launchpadResult.status === 'fulfilled' ? launchpadResult.value : null;
-  const osDrop = osDropResult.status === 'fulfilled' ? osDropResult.value : null;
+  const platformData = platformResult.status === 'fulfilled' ? platformResult.value : null;
+  const osDrop       = osDropResult.status === 'fulfilled'   ? osDropResult.value   : null;
   const osCollection = osCollectionResult.status === 'fulfilled' ? osCollectionResult.value : null;
-  const browser = browserResult.status === 'fulfilled' ? browserResult.value : null;
+  const browser      = browserResult.status === 'fulfilled'  ? browserResult.value  : null;
 
-  logger.info(`Detection results - Launchpad: ${!!launchpad}, OSDrop: ${!!osDrop}, OSCollection: ${!!osCollection}, Browser: ${!!browser}`);
+  logger.info(
+    `[${platform}] Detection results — Platform: ${!!platformData}, OSDrop: ${!!osDrop}, ` +
+    `OSCollection: ${!!osCollection}, Browser: ${!!(browser?.phases?.length)}`
+  );
 
   // Merge all results, prioritizing the most complete source
-  const merged = mergeDetectionResults({ launchpad, osDrop, osCollection, browser, mintUrl });
+  const merged = mergeDetectionResults({ platformData, osDrop, osCollection, browser, mintUrl, platform });
 
   // Build market links if we have a contract
   if (merged.contract && merged.chain) {
@@ -64,15 +72,23 @@ async function detectMint(mintUrl) {
 }
 
 /**
- * Merge detection layer results with priority:
- * launchpad > osDrop > browser > osCollection (for phases)
- * osCollection > osDrop > launchpad (for metadata)
+ * Merge detection layer results.
+ *
+ * Priority (highest → lowest):
+ *   Phases:   platformData > osDrop > browser
+ *   Name:     osCollection > osDrop > platformData > browser
+ *   Chain:    platformData > osDrop > osCollection > browser (text-only as last resort)
+ *   Contract: any source, first non-null wins
+ *   Socials:  any source, first non-null wins
+ *
+ * All inputs have been through normalizeMintData() so field names are canonical.
  */
-function mergeDetectionResults({ launchpad, osDrop, osCollection, browser, mintUrl }) {
+function mergeDetectionResults({ platformData, osDrop, osCollection, browser, mintUrl, platform }) {
   const result = {
     name: null,
     chain: detectChainFromUrl(mintUrl) || 'Ethereum',
     mint_link: mintUrl,
+    platform: platform || null,
     phases: [],
     contract: null,
     total_supply: null,
@@ -84,64 +100,66 @@ function mergeDetectionResults({ launchpad, osDrop, osCollection, browser, mintU
     needs_manual: false,
   };
 
-  // Collect all sources for merging
-  const sources = [osCollection, osDrop, launchpad, browser].filter(Boolean);
+  // Collect all sources for iterating (normalized data, no nulls)
+  const sources = [osCollection, osDrop, platformData, browser].filter(Boolean);
 
-  // Name: first non-null from priority sources
-  for (const s of [osCollection, osDrop, launchpad, browser]) {
+  // Name: OS collection name is most reliable for branded collections
+  for (const s of [osCollection, osDrop, platformData, browser]) {
     if (s?.name) { result.name = s.name; break; }
   }
 
-  // Chain: launchpad/drop knows best for non-OpenSea platforms
-  for (const s of [launchpad, osDrop, osCollection, browser]) {
+  // Chain: API sources are authoritative; text-based detection is a last resort
+  for (const s of [platformData, osDrop, osCollection, browser]) {
     if (s?.chain) { result.chain = s.chain; break; }
   }
-  // Text-based chain detection ONLY when no API source returned a chain
-  // (avoids overriding a correct "Ethereum" with unrelated page mentions of other chains)
-  const hasApiChain = [launchpad, osDrop, osCollection].some(s => s?.chain);
+  // Text-based chain detection ONLY when no API source returned a chain.
+  // This avoids overriding a correct "Ethereum" with an unrelated chain
+  // keyword found elsewhere on the page (e.g. footer mentions of "Optimism").
+  const hasApiChain = [platformData, osDrop, osCollection].some(s => s?.chain);
   if (!hasApiChain && browser?.text) {
     result.chain = detectChainFromText(browser.text) || result.chain;
   }
 
-  // Contract: any source that has it
+  // Contract
   for (const s of sources) {
     if (s?.contract) { result.contract = s.contract; break; }
   }
 
   // Supply
-  for (const s of [osDrop, launchpad, osCollection]) {
+  for (const s of [osDrop, platformData, osCollection]) {
     if (s?.total_supply) { result.total_supply = s.total_supply; break; }
   }
 
   // Minted count
-  for (const s of [osDrop, launchpad]) {
+  for (const s of [osDrop, platformData]) {
     if (s?.minted) { result.minted = s.minted; break; }
   }
 
-  // Phases: prioritize most detailed source
-  const phaseSources = [launchpad, osDrop, browser].filter(s => s?.phases?.length > 0);
+  // Phases: pick the source with most complete data, then deduplicate
+  const phaseSources = [platformData, osDrop, browser].filter(s => s?.phases?.length > 0);
   if (phaseSources.length > 0) {
-    // Pick the source with the most phase data
-    result.phases = phaseSources.reduce((best, s) =>
-      s.phases.length >= best.phases.length ? s : best
-    ).phases;
+    const best = phaseSources.reduce((b, s) =>
+      s.phases.length >= b.phases.length ? s : b
+    );
+    result.phases = deduplicatePhases(best.phases);
   }
 
-  // Socials
-  for (const s of sources) {
-    if (s?.x_link) { result.x_link = s.x_link; break; }
-  }
-  for (const s of sources) {
-    if (s?.discord_link) { result.discord_link = s.discord_link; break; }
-  }
-  for (const s of sources) {
-    if (s?.os_link) { result.os_link = s.os_link; break; }
+  // Socials (any source)
+  for (const s of sources) { if (s?.x_link)       { result.x_link = s.x_link; break; } }
+  for (const s of sources) { if (s?.discord_link)  { result.discord_link = s.discord_link; break; } }
+  for (const s of sources) { if (s?.os_link)       { result.os_link = s.os_link; break; } }
+
+  // Platform name (prefer the platform module's self-reported name)
+  if (!result.platform) {
+    for (const s of [platformData, osDrop, osCollection, browser]) {
+      if (s?.platform) { result.platform = s.platform; break; }
+    }
   }
 
   // Flag if no usable data was found
   if (!result.name && result.phases.length === 0) {
     result.needs_manual = true;
-    result.name = result.name || 'Unknown Collection';
+    result.name = 'Unknown Collection';
   }
 
   return result;
@@ -149,6 +167,16 @@ function mergeDetectionResults({ launchpad, osDrop, osCollection, browser, mintU
 
 /**
  * Layer 4: Stealth browser scraping for OpenSea and other JS-heavy pages.
+ *
+ * For OpenSea: navigates to /overview subpage and uses a 3-pass strategy
+ * (__NEXT_DATA__ → XHR intercept polling → innerText parse).
+ *
+ * For other URLs: waits for page to settle and parses visible text.
+ *
+ * Returns { phases, name?, chain?, contract?, text? } or null on failure.
+ * The output is NOT run through normalizeMintData() here so that
+ * mergeDetectionResults() can still access the raw `text` field for
+ * chain detection from page content.
  */
 async function scrapeBrowserPhases(url) {
   try {
@@ -540,4 +568,6 @@ module.exports = {
   scrapeBrowserPhases,
   scrapeOpenSeaPage,
   parseOpenSeaPageText,
+  parseNextData,
+  parseOpenSeaApiBody,
 };

@@ -49,10 +49,10 @@ function createMint(data) {
   const stmt = getDb().prepare(`
     INSERT INTO mints
       (name, chain, mint_link, phases, status, alert_channels, summary_channels,
-       notes, x_link, os_link, contract, discord_link, total_supply, minted, market_links)
+       notes, x_link, os_link, contract, discord_link, total_supply, minted, market_links, platform)
     VALUES
       (@name, @chain, @mint_link, @phases, @status, @alert_channels, @summary_channels,
-       @notes, @x_link, @os_link, @contract, @discord_link, @total_supply, @minted, @market_links)
+       @notes, @x_link, @os_link, @contract, @discord_link, @total_supply, @minted, @market_links, @platform)
   `);
   const result = stmt.run({
     name: data.name,
@@ -70,6 +70,7 @@ function createMint(data) {
     total_supply: data.total_supply || null,
     minted: data.minted || 0,
     market_links: JSON.stringify(data.market_links || {}),
+    platform: data.platform || null,
   });
   return getMintById(result.lastInsertRowid);
 }
@@ -78,7 +79,7 @@ function updateMint(id, updates) {
   const allowed = [
     'name','chain','mint_link','phases','status','paused','alert_channels',
     'summary_channels','notes','x_link','os_link','contract','discord_link',
-    'total_supply','minted','market_links','fast_mint_alerted',
+    'total_supply','minted','market_links','fast_mint_alerted','platform',
   ];
   const fields = Object.keys(updates).filter(k => allowed.includes(k));
   if (fields.length === 0) return getMintById(id);

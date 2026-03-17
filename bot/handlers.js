@@ -187,6 +187,7 @@ function buildDetectionPreview(data) {
   const lines = ['🔍 <b>Detection Result</b>\n'];
   lines.push(`📝 Name: <b>${escHtml(data.name || 'Unknown')}</b>`);
   lines.push(`⛓ Chain: ${escHtml(data.chain || 'Ethereum')}`);
+  if (data.platform) lines.push(`🏷 Platform: ${escHtml(data.platform)}`);
   if (data.contract) lines.push(`📋 Contract: <code>${escHtml(data.contract)}</code>`);
   if (data.total_supply) lines.push(`📦 Supply: ${data.total_supply.toLocaleString()}`);
 
