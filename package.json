@@ -20,11 +20,7 @@
     "node-cron": "^3.0.3",
     "dotenv": "^16.4.7",
     "winston": "^3.17.0",
-    "dayjs": "^1.11.13",
-    "p-queue": "^8.0.1",
-    "bottleneck": "^2.19.5",
-    "cheerio": "^1.0.0",
-    "user-agents": "^1.1.439"
+    "dayjs": "^1.11.13"
   },
   "devDependencies": {},
   "license": "MIT"
