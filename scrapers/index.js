@@ -54,7 +54,8 @@ async function detectMint(mintUrl) {
 
   logger.info(
     `[${platform}] Detection results — Platform: ${!!platformData}, OSDrop: ${!!osDrop}, ` +
-    `OSCollection: ${!!osCollection}, Browser: ${!!(browser?.phases?.length)}`
+    `OSCollection: ${!!osCollection}, ` +
+    `Browser: ${browser === null ? 'null(failed)' : (browser?.phases?.length ?? 0) + ' phase(s)'}`
   );
 
   // Merge all results, prioritizing the most complete source
@@ -192,7 +193,7 @@ async function scrapeBrowserPhases(url) {
     const { text } = await scrapeUrl(url, { waitMs: 4000, timeout: 40000 });
     return parseGenericPageText(text);
   } catch (err) {
-    logger.debug(`Browser scrape failed for ${url}: ${err.message}`);
+    logger.warn(`Browser scrape failed for ${url}: ${err.message}`);
     return null;
   }
 }
@@ -242,7 +243,13 @@ async function scrapeOpenSeaPage(url) {
     });
 
     // Navigate — interception already active
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    const gotoResponse = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    const httpStatus = gotoResponse?.status?.() ?? 'unknown';
+    logger.info(`OpenSea browser nav → ${url} (HTTP ${httpStatus})`);
+    if (httpStatus === 403 || httpStatus === 429) {
+      logger.warn(`OpenSea blocked browser (${httpStatus}) for ${url}`);
+      return { phases: [] };
+    }
 
     // ── Pass 1: __NEXT_DATA__ (available right after DOMContentLoaded) ─────
     const nextData = await page.evaluate(() => {
@@ -263,7 +270,7 @@ async function scrapeOpenSeaPage(url) {
     // ── Pass 2: poll for XHR data and DOM content up to 18 s ──────────────
     // Phase data is loaded by client-side fetches after hydration.
     // Poll every 2 s so we exit as soon as data arrives.
-    const MONTH_RE = /January|February|March|April|May|June|July|August|September|October|November|December/;
+    const MONTH_RE = /Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?/i;
     const PRICE_RE = /\d+\.?\d*\s*ETH|\bfree\b/i; // also match free mints
     const deadline = Date.now() + 18000;
 
@@ -312,7 +319,7 @@ async function scrapeOpenSeaPage(url) {
     if (result.phases.length > 0) {
       logger.info(`OpenSea text parse found ${result.phases.length} phase(s) for ${url}`);
     } else {
-      logger.debug(`OpenSea scrape: no phases found for ${url}`);
+      logger.warn(`OpenSea scrape: 0 phases for ${url} | page text (first 600): ${text.slice(0, 600).replace(/\n/g, '↵')}`);
     }
     return result;
 
@@ -454,7 +461,8 @@ function parseOpenSeaPageText(text) {
     return { phases: [{ name: 'Public Mint', time, price: 'TBD', limit: null }], countdown_detected: true };
   }
 
-  const MONTH_RE = /^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d/i;
+  // Match both full (March) and abbreviated (Mar) month names at start of line
+  const MONTH_RE = /^(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d/i;
   const PRICE_RE = /^(\d+\.?\d*)\s*(ETH|SOL|MATIC|BNB|AVAX)/i;
   const FREE_RE  = /^free\b/i;
   const LIMIT_RE = /max\s+(\d+)/i;
