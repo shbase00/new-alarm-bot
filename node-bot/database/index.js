@@ -13,7 +13,7 @@ function getDb() {
 }
 
 function initDb() {
-  const dbPath = process.env.DATABASE_PATH || './data/mints.db';
+  const dbPath = process.env.DATABASE_PATH || '/data/alarm.db';
   const dir = path.dirname(dbPath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
