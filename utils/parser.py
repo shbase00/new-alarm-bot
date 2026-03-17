@@ -39,11 +39,16 @@ CHAIN_NORMALIZE = {
     "base": "Base", "blast": "Blast", "arbitrum": "Arbitrum",
     "polygon": "Polygon", "optimism": "Optimism", "zora": "Zora",
     "solana": "Solana", "sol": "Solana", "bitcoin": "Bitcoin", "btc": "Bitcoin",
+    "megaeth": "MegaETH", "mega": "MegaETH",
+    "abstract": "Abstract", "abs": "Abstract",
+    "linea": "Linea", "scroll": "Scroll", "starknet": "Starknet",
+    "bnb": "BNB", "bsc": "BNB", "avalanche": "Avalanche", "avax": "Avalanche",
 }
 
 CHAIN_OS_SLUG = {
     'Ethereum': 'ethereum', 'Base': 'base', 'Blast': 'blast',
     'Arbitrum': 'arbitrum', 'Polygon': 'matic', 'Optimism': 'optimism', 'Zora': 'zora',
+    'Abstract': 'abstract',
 }
 
 # ─────────────────────────────────────────────
@@ -363,7 +368,23 @@ async def _detect_via_drops_api(slug: str) -> dict:
 
     if phases:
         logger.info(f"[API:drops] {len(phases)} phases for {slug}: {[p['name'] for p in phases]}")
-        return {'phases': phases, 'success': True, 'total_minted': int(total_minted)}
+
+        # Extract contract from drops response
+        contract = (
+            data.get('contract_address') or
+            data.get('contract') or
+            (data.get('drop') or {}).get('contract_address') or
+            (data.get('drop') or {}).get('contract') or ''
+        )
+        # Also check contracts array
+        contracts = data.get('contracts') or []
+        if not contract and contracts and isinstance(contracts, list):
+            contract = contracts[0].get('address', '')
+
+        if contract:
+            logger.info(f"[API:drops] contract={contract}")
+
+        return {'phases': phases, 'success': True, 'total_minted': int(total_minted), 'contract': contract}
 
     return {}
 
@@ -485,29 +506,41 @@ async def detect_opensea_parallel(url: str, slug: str) -> dict:
         if pc_r and pc_r.get('phases'):
             elapsed = (datetime.utcnow() - t0).total_seconds()
             logger.info(f"[parallel] PC scraper succeeded in {elapsed:.1f}s")
-            col_r = await _run_with_timeout(_detect_via_collections_api(slug), 10, "collections_api")
+
+            # Run both collections + drops API in parallel to get contract/chain/metadata
+            col_r, drops_r = await asyncio.gather(
+                _run_with_timeout(_detect_via_collections_api(slug), 10, "collections_api"),
+                _run_with_timeout(_detect_via_drops_api(slug),       10, "drops_api"),
+            )
+
             result = {
                 'name':               pc_r.get('name', ''),
                 'chain':              'Ethereum',
                 'contract':           '',
                 'x_link':             pc_r.get('twitter', ''),
                 'discord_link':       pc_r.get('discord', ''),
-                'total_supply':       pc_r.get('total_supply', 0),
+                'total_supply':       0,
                 'minted':             pc_r.get('minted', 0),
                 'phases':             pc_r['phases'],
                 'success':            True,
                 'needs_manual':       False,
                 'countdown_detected': False,
             }
+
+            # Merge collections API metadata (name, chain, contract, social)
             if col_r:
                 if col_r.get('name'):         result['name']         = col_r['name']
                 if col_r.get('chain'):        result['chain']        = col_r['chain']
                 if col_r.get('contract'):     result['contract']     = col_r['contract']
                 if col_r.get('x_link'):       result['x_link']       = col_r['x_link']
                 if col_r.get('discord_link'): result['discord_link'] = col_r['discord_link']
-                # Only use OpenSea supply if PC didn't detect one
-                if col_r.get('total_supply') and not result['total_supply']:
-                    result['total_supply'] = col_r['total_supply']
+
+            # Merge drops API — has contract for upcoming drops + supply
+            if drops_r:
+                if drops_r.get('contract') and not result['contract']:
+                    result['contract'] = drops_r['contract']
+
+            logger.info(f"[parallel] contract={result['contract'] or 'NOT FOUND'} chain={result['chain']}")
             if not result['name']:
                 result['name'] = slug.replace('-', ' ').title()
             return result
@@ -830,6 +863,15 @@ ETHERSCAN_CHAIN_IDS = {
     'arbitrum': '42161',
     'optimism': '10',
     'blast':    '81457',
+    'linea':    '59144',
+    'scroll':   '534352',
+    'bnb':      '56',
+    'bsc':      '56',
+    'avalanche':'43114',
+    'avax':     '43114',
+    # MegaETH + Abstract — testnet only for now, no mainnet chain ID yet
+    # 'megaeth': '...',   ← not live on mainnet yet
+    # 'abstract': '2741', ← Abstract mainnet (via abscan.org, not Etherscan V2)
 }
 ETHERSCAN_V2_URL = 'https://api.etherscan.io/v2/api'
 

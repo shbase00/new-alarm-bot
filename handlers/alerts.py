@@ -28,6 +28,10 @@ from database import (
 logger = logging.getLogger(__name__)
 _app: Application = None
 
+# Track failed contract fetch attempts per mint_id — stop after 10 fails
+_contract_fetch_fails: dict[int, int] = {}
+CONTRACT_FETCH_MAX_ATTEMPTS = 10
+
 
 async def setup_scheduler(app: Application):
     global _app
@@ -75,6 +79,8 @@ def _chain_emoji(chain: str) -> str:
         'ethereum': '⟠', 'base': '🔵', 'blast': '💥', 'arbitrum': '🔷',
         'polygon': '🟣', 'solana': '◎', 'bitcoin': '₿', 'zora': '🟡',
         'optimism': '🔴', 'avalanche': '🔺', 'bnb': '🟡',
+        'megaeth': '⚡', 'abstract': '🌀',
+        'linea': '🟢', 'scroll': '📜', 'starknet': '🌟',
     }
     return emojis.get((chain or '').lower(), '⛓')
 
@@ -92,6 +98,7 @@ def _format_single_mint_block(mint: dict, alert_type: str, phase: dict) -> str:
     chain_emoji  = _chain_emoji(chain)
     minted       = mint.get('minted', 0) or 0
     total_supply = mint.get('total_supply', 0) or 0
+    floor        = mint.get('floor_price', 0) or 0
 
     phase_name = _esc((phase or {}).get('name', 'Phase'))
     price      = _esc((phase or {}).get('price', 'TBA'))
@@ -99,19 +106,22 @@ def _format_single_mint_block(mint: dict, alert_type: str, phase: dict) -> str:
     # Line 1: bold name
     lines = [f'<b>🎯 {name}</b>', '']
 
-    # Line 2: chain | phase | price  (supply if set)
+    # Line 2: chain | phase | price
     info = f'{chain_emoji} {_esc(chain)} | {phase_name} | {price}'
     if total_supply:
         info += f' | {minted:,}/{total_supply:,}'
     lines.append(info)
     lines.append('')
 
-    # Line 3: countdown or live
+    # Line 3: countdown (pre only — no live line)
     if alert_type == 'pre':
         lines.append(f'⏰ <b>{phase_name}</b> starts in {ALERT_MINUTES_BEFORE} minutes')
-    else:
-        lines.append(f'🟢 <b>{phase_name}</b> is LIVE now')
-    lines.append('')
+        lines.append('')
+
+    # Floor price (show on pre-alert if available)
+    if alert_type == 'pre' and floor:
+        lines.append(f'💎 Floor: {floor:.4f} ETH')
+        lines.append('')
 
     # Links
     links = _build_links_html(mint)
@@ -122,23 +132,14 @@ def _format_single_mint_block(mint: dict, alert_type: str, phase: dict) -> str:
 
 
 def _format_mint_alert(mint: dict, alert_type: str = 'pre', phase: dict = None) -> str:
-    """Format a single-mint alert (fallback, used by API trigger)."""
-    if alert_type == 'live':
-        header = '🚨 MINT IS LIVE'
-    else:
-        header = '🚨 MINT ALERT'
-
+    """Format a single-mint alert."""
     block = _format_single_mint_block(mint, alert_type, phase or {})
-    return f'<b>{header}</b>\n\n{block}'
+    return f'<b>🚨 MINT ALERT</b>\n\n{block}'
 
 
 def _format_combined_alert(pairs: list, alert_type: str) -> str:
     """Format multiple mints into one combined alert message."""
-    if alert_type == 'live':
-        header = f'🚨 MINT IS LIVE — {len(pairs)} collections'
-    else:
-        header = f'🚨 MINT ALERT — {len(pairs)} collections'
-
+    header = f'🚨 MINT ALERT — {len(pairs)} collections'
     blocks = [_format_single_mint_block(mint, alert_type, phase) for mint, phase in pairs]
     divider = '\n\n' + '─' * 20 + '\n\n'
     return f'<b>{header}</b>\n\n' + divider.join(blocks)
@@ -148,13 +149,26 @@ def _format_sold_out_alert(mint: dict) -> str:
     name         = _esc(mint.get('name', 'Unknown'))
     mint_link    = mint.get('mint_link', '') or mint.get('os_link', '')
     total_supply = mint.get('total_supply', 0) or 0
-    supply_str   = f'{total_supply:,} / {total_supply:,}' if total_supply else 'N/A'
+    floor        = mint.get('floor_price', 0) or 0
+    chain        = mint.get('chain', 'Ethereum')
+    chain_emoji  = _chain_emoji(chain)
+    supply_str   = f'{total_supply:,}' if total_supply else 'N/A'
     name_html    = f'<a href="{mint_link}"><b>{name}</b></a>' if mint_link else f'<b>{name}</b>'
-    return (
-        f'🔥 <b>SOLD OUT</b>\n\n'
-        f'{name_html}\n'
-        f'Supply: {supply_str}'
-    )
+
+    lines = [
+        f'🔥 <b>SOLD OUT</b>\n',
+        f'{name_html}',
+        f'{chain_emoji} {_esc(chain)} | 📦 {supply_str} minted',
+    ]
+    if floor:
+        lines.append(f'💎 Floor: {floor:.4f} ETH')
+
+    links = _build_links_html(mint)
+    if links:
+        lines.append('')
+        lines.append(links)
+
+    return '\n'.join(lines)
 
 
 def _format_floor_pump_alert(mint: dict, old_floor: float, new_floor: float) -> str:
@@ -204,7 +218,6 @@ async def check_and_send_alerts():
 
     from collections import defaultdict
     pre_buckets = defaultdict(list)
-    live_buckets = defaultdict(list)
 
     for mint in mints:
         if mint.get('paused'):
@@ -231,11 +244,9 @@ async def check_and_send_alerts():
                         pre_buckets[ch_id].append((mint, phase))
                     mark_alert_sent(mint['id'], phase_name, alert_key)
 
-            # Live alert
+            # Update status to live (no alert sent)
             if -2 <= time_diff <= 2:
                 if not alert_already_sent(mint['id'], phase_name, 'live'):
-                    for ch_id in get_alert_channels_for_mint(mint):
-                        live_buckets[ch_id].append((mint, phase))
                     mark_alert_sent(mint['id'], phase_name, 'live')
                     update_mint(mint['id'], status='live')
 
@@ -246,7 +257,6 @@ async def check_and_send_alerts():
                     asyncio.ensure_future(_check_sold_out(mint, phase))
 
     for ch_id, pairs in pre_buckets.items():
-        # Deduplicate by (mint_id, phase_name)
         seen = set()
         unique = []
         for m, p in pairs:
@@ -260,21 +270,6 @@ async def check_and_send_alerts():
             logger.info(f"Pre-mint alert sent to {ch_id}: {[m['name'] for m, _ in unique]}")
         except Exception as e:
             logger.error(f"Pre alert send error {ch_id}: {e}")
-
-    for ch_id, pairs in live_buckets.items():
-        seen = set()
-        unique = []
-        for m, p in pairs:
-            key = (m['id'], p.get('name', ''))
-            if key not in seen:
-                seen.add(key)
-                unique.append((m, p))
-        try:
-            msg = _format_combined_alert(unique, 'live') if len(unique) > 1 else _format_mint_alert(unique[0][0], 'live', unique[0][1])
-            await _app.bot.send_message(chat_id=ch_id, text=msg, parse_mode='HTML', disable_web_page_preview=True)
-            logger.info(f"Live alert sent to {ch_id}: {[m['name'] for m, _ in unique]}")
-        except Exception as e:
-            logger.error(f"Live alert send error {ch_id}: {e}")
 
 
 # ── SOLD OUT ─────────────────────────────────────────────────
@@ -341,31 +336,53 @@ async def check_floor_and_sweeps():
 
         status = mint.get('status', 'upcoming')
 
-        # Track minted for any mint that has a contract or OS link (even upcoming)
-        # This lets sold-out fire automatically once minting starts
-        has_trackable = mint.get('contract') or mint.get('os_link') or mint.get('mint_link')
-        if has_trackable and status not in ('sold_out', 'ended'):
+        # If upcoming but first phase already started → treat as live for tracking
+        if status == 'upcoming':
+            phases = mint.get('phases') or []
+            for p in phases:
+                if p.get('time'):
+                    try:
+                        phase_dt = datetime.strptime(p['time'], "%Y-%m-%d %H:%M")
+                        if (datetime.utcnow() - phase_dt).total_seconds() > 120:
+                            # Phase started more than 2 min ago — bot missed the live window
+                            status = 'live'
+                            update_mint(mint['id'], status='live')
+                            logger.info(f"[status] {mint.get('name')} auto-set to live (phase started)")
+                    except Exception:
+                        pass
+                    break
+
+        # ── Minted tracking: only when LIVE, stop when sold_out/ended ──
+        if status == 'live':
             # Auto-fetch contract if missing
             if not mint.get('contract'):
+                mid  = mint['id']
+                fails = _contract_fetch_fails.get(mid, 0)
+                if fails < CONTRACT_FETCH_MAX_ATTEMPTS:
+                    try:
+                        from utils.parser import fetch_contract_address
+                        contract = await fetch_contract_address(mint)
+                        if contract:
+                            update_mint(mid, contract=contract)
+                            mint = dict(mint)
+                            mint['contract'] = contract
+                            _contract_fetch_fails.pop(mid, None)
+                            logger.info(f"[contract] Auto-fetched for {mint.get('name')}: {contract}")
+                        else:
+                            _contract_fetch_fails[mid] = fails + 1
+                            logger.info(f"[contract] Not found for {mint.get('name')} (attempt {fails+1}/{CONTRACT_FETCH_MAX_ATTEMPTS})")
+                    except Exception as e:
+                        _contract_fetch_fails[mid] = fails + 1
+                        logger.warning(f"[contract] fetch error for {mint.get('name')}: {e}")
+
+            # Track minted count
+            if mint.get('contract') or mint.get('os_link') or mint.get('mint_link'):
                 try:
-                    from utils.parser import fetch_contract_address
-                    contract = await fetch_contract_address(mint)
-                    if contract:
-                        update_mint(mint['id'], contract=contract)
-                        mint = dict(mint)
-                        mint['contract'] = contract
-                        logger.info(f"[contract] Auto-fetched for {mint.get('name')}: {contract}")
-                    else:
-                        logger.info(f"[contract] Not found for {mint.get('name')} (slug={mint.get('os_link') or mint.get('mint_link')})")
+                    await _track_minted(mint)
                 except Exception as e:
-                    logger.warning(f"[contract] fetch error for {mint.get('name')}: {e}")
+                    logger.debug(f"Minted track error for {mint.get('name')}: {e}")
 
-            try:
-                await _track_minted(mint)
-            except Exception as e:
-                logger.debug(f"Minted track error for {mint.get('name')}: {e}")
-
-        # Floor + sweep only for live/sold_out
+        # ── Floor + sweep: only live/sold_out ──
         if status not in ('live', 'sold_out'):
             continue
 
@@ -405,13 +422,9 @@ async def _track_minted(mint: dict):
         except Exception as e:
             logger.debug(f"[supply] error for {mint.get('name')}: {e}")
 
-    # ── Step 2: get current minted count from Etherscan ──
-    contract = (mint.get('contract') or '').strip()
-    if not contract:
-        logger.info(f"[minted] {mint.get('name')}: no contract address — skipping Etherscan, trying OpenSea drops API")
+    # ── Step 2: get current minted count ──
     minted = await get_minted_count(mint)
     if minted is None:
-        logger.info(f"[minted] {mint.get('name')}: could not get minted count (no contract + OpenSea returned nothing)")
         return
 
     # ── Guard: if minted > total_supply, the stored supply is wrong ──
