@@ -114,37 +114,83 @@ function isEVMChain(chain) {
 
 // ── Time parsing ───────────────────────────────────────────────────────────────
 
-const TIME_FORMATS = [
+// Strict dayjs formats (must match exactly)
+const TIME_FORMATS_STRICT = [
   'YYYY-MM-DDTHH:mm:ssZ',
   'YYYY-MM-DDTHH:mm:ss.SSSZ',
   'YYYY-MM-DD HH:mm:ss',
   'YYYY-MM-DD HH:mm',
   'MM/DD/YYYY HH:mm',
   'MMMM D, YYYY [at] h:mm A',
-  'MMMM D [at] h:mm A',
   'MMM D, YYYY h:mm A',
 ];
+
+// Regex-based fallbacks for formats dayjs strict mode rejects
+// Covers OpenSea's "March 18 at 3:00 PM UTC" and "March 18, 2026 at 3:00 PM UTC"
+const MONTHS = {
+  january:1, february:2, march:3, april:4, may:5, june:6,
+  july:7, august:8, september:9, october:10, november:11, december:12,
+  jan:1, feb:2, mar:3, apr:4, jun:6, jul:7, aug:8, sep:9, oct:10, nov:11, dec:12,
+};
+
+function parseOpenSeaDateStr(s) {
+  // "March 18 at 3:00 PM UTC" or "March 18, 2026 at 3:00 PM UTC"
+  const m = s.match(
+    /^(\w+)\s+(\d{1,2})(?:,\s*(\d{4}))?\s+at\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?\s*(UTC|GMT)?/i
+  );
+  if (!m) return null;
+
+  const month = MONTHS[m[1].toLowerCase()];
+  if (!month) return null;
+
+  const day  = parseInt(m[2]);
+  const year = m[3] ? parseInt(m[3]) : new Date().getUTCFullYear();
+  let   hour = parseInt(m[4]);
+  const min  = parseInt(m[5]);
+  const sec  = m[6] ? parseInt(m[6]) : 0;
+  const ampm = (m[7] || '').toUpperCase();
+
+  if (ampm === 'PM' && hour < 12) hour += 12;
+  if (ampm === 'AM' && hour === 12) hour = 0;
+
+  const d = new Date(Date.UTC(year, month - 1, day, hour, min, sec));
+
+  // If no year was given and the date is already in the past, bump to next year
+  if (!m[3] && d < new Date()) {
+    d.setUTCFullYear(d.getUTCFullYear() + 1);
+  }
+
+  return isNaN(d) ? null : d;
+}
 
 function parseTime(input) {
   if (!input) return null;
 
+  // Unix timestamp
   const num = Number(input);
   if (!isNaN(num) && num > 1e9) {
-    return new Date(num * (num < 1e12 ? 1000 : 1));
+    return new Date(num < 1e12 ? num * 1000 : num);
   }
 
+  // Native Date (handles ISO 8601 and RFC 2822)
   const iso = new Date(input);
   if (!isNaN(iso.getTime())) return iso;
 
+  // Relative: "in 1 day 3 hours 20 minutes"
   const relMatch = input.match(/in\s+(?:(\d+)\s+days?)?\s*(?:(\d+)\s+hours?)?\s*(?:(\d+)\s+min(?:utes?)?)?/i);
-  if (relMatch) {
+  if (relMatch && (relMatch[1] || relMatch[2] || relMatch[3])) {
     const d = parseInt(relMatch[1] || 0);
     const h = parseInt(relMatch[2] || 0);
     const m = parseInt(relMatch[3] || 0);
     return new Date(Date.now() + (d * 86400 + h * 3600 + m * 60) * 1000);
   }
 
-  for (const fmt of TIME_FORMATS) {
+  // OpenSea human format: "March 18 at 3:00 PM UTC"
+  const osDate = parseOpenSeaDateStr(input.trim());
+  if (osDate) return osDate;
+
+  // dayjs strict formats
+  for (const fmt of TIME_FORMATS_STRICT) {
     const parsed = dayjs.utc(input, fmt, true);
     if (parsed.isValid()) return parsed.toDate();
   }

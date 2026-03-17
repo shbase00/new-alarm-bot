@@ -151,7 +151,12 @@ function mergeDetectionResults({ launchpad, osDrop, osCollection, browser, mintU
 async function scrapeBrowserPhases(url) {
   try {
     const isOpenSea = url.toLowerCase().includes('opensea.io');
-    if (isOpenSea) return scrapeOpenSeaPage(url);
+    if (isOpenSea) {
+      // Always scrape the /overview subpage — that's where OpenSea renders
+      // the full mint schedule with all phases and times
+      const overviewUrl = toOpenSeaOverviewUrl(url);
+      return scrapeOpenSeaPage(overviewUrl);
+    }
 
     // Generic page scrape for phase data
     const { text } = await scrapeUrl(url, { waitMs: 4000, timeout: 40000 });
@@ -160,6 +165,16 @@ async function scrapeBrowserPhases(url) {
     logger.debug(`Browser scrape failed for ${url}: ${err.message}`);
     return null;
   }
+}
+
+/**
+ * Normalize any opensea.io/collection/<slug>[/*] URL to the /overview subpage.
+ */
+function toOpenSeaOverviewUrl(url) {
+  // Strip existing subpaths after the slug, then append /overview
+  const m = url.match(/^(https?:\/\/opensea\.io\/collection\/[^/?#]+)/i);
+  if (m) return `${m[1]}/overview`;
+  return url;
 }
 
 /**
@@ -250,36 +265,64 @@ function parseNextData(data) {
   const phases = [];
   let name = null, chain = null, contract = null, total_supply = null, minted = 0;
 
+  function toIso(val) {
+    if (!val) return null;
+    const n = Number(val);
+    if (!isNaN(n) && n > 1e9) return new Date(n < 1e12 ? n * 1000 : n).toISOString();
+    const d = new Date(val);
+    return isNaN(d) ? null : d.toISOString();
+  }
+
+  function extractStage(s) {
+    // Cover all field names seen across OpenSea page types and API versions
+    const time =
+      s.startTime ?? s.start_time ?? s.startTimestamp ?? s.mintStartTime ??
+      s.start ?? s.begins_at ?? s.scheduled_start_time ?? s.opensAt;
+    const endTime =
+      s.endTime ?? s.end_time ?? s.endTimestamp ?? s.mintEndTime ??
+      s.end ?? s.ends_at ?? s.scheduled_end_time ?? s.closesAt;
+    const price =
+      s.price?.amount ?? s.price?.value ?? s.mintPrice ?? s.cost ??
+      s.price ?? s.pricePerToken ?? s.unit_price;
+    const limit =
+      s.limit ?? s.walletLimit ?? s.maxPerWallet ?? s.limitPerWallet ??
+      s.max_per_wallet ?? s.wallet_limit;
+
+    return {
+      name: s.name ?? s.stageName ?? s.stage_name ?? s.label ?? s.type ?? 'Mint',
+      time: toIso(time),
+      end_time: toIso(endTime),
+      price: normalizePriceStr(price),
+      limit: limit ?? null,
+    };
+  }
+
   // Walk the props tree looking for drop/mint stage structures
   function walk(obj, depth = 0) {
-    if (!obj || typeof obj !== 'object' || depth > 12) return;
+    if (!obj || typeof obj !== 'object' || depth > 14) return;
 
-    // Direct mint_stages / stages array
-    const stageList = obj.mint_stages || obj.mintStages || obj.stages ||
-                      obj.dropStages || obj.mintPhases || obj.phases;
+    // All known stage-list field names across OpenSea page types
+    const stageList =
+      obj.mint_stages ?? obj.mintStages ?? obj.stages ?? obj.dropStages ??
+      obj.mintPhases ?? obj.phases ?? obj.drop_stages ?? obj.saleStages ??
+      obj.mintSchedule ?? obj.schedule ?? obj.allowlist_stages ??
+      obj.public_stages ?? obj.presale_stages;
+
     if (Array.isArray(stageList) && stageList.length > 0) {
       for (const s of stageList) {
-        const time = s.startTime || s.start_time || s.startTimestamp || s.mintStartTime;
-        const endTime = s.endTime || s.end_time;
-        const price = s.price?.amount ?? s.mintPrice ?? s.price ?? s.cost;
-        const limit = s.limit ?? s.walletLimit ?? s.maxPerWallet ?? s.limitPerWallet;
-        phases.push({
-          name: s.name || s.stageName || s.label || 'Mint',
-          time: time ? new Date(typeof time === 'number' ? time * 1000 : time).toISOString() : null,
-          end_time: endTime ? new Date(typeof endTime === 'number' ? endTime * 1000 : endTime).toISOString() : null,
-          price: normalizePriceStr(price),
-          limit: limit ?? null,
-        });
+        phases.push(extractStage(s));
       }
-      return; // found what we need
+      // Don't return — keep walking for metadata
     }
 
     // Grab collection metadata opportunistically
-    if (!name && (obj.name || obj.collectionName)) name = obj.name || obj.collectionName;
-    if (!contract && obj.contractAddress) contract = obj.contractAddress;
-    if (!total_supply && obj.totalSupply) total_supply = Number(obj.totalSupply);
-    if (!minted && obj.mintedItemCount) minted = Number(obj.mintedItemCount);
-    if (!chain && obj.chain) chain = obj.chain;
+    if (!name) name = obj.name ?? obj.collectionName ?? obj.collection_name ?? null;
+    if (!contract) contract = obj.contractAddress ?? obj.contract_address ?? obj.address ?? null;
+    if (!total_supply && (obj.totalSupply || obj.total_supply))
+      total_supply = Number(obj.totalSupply ?? obj.total_supply);
+    if (!minted && (obj.mintedItemCount || obj.minted_count || obj.totalMinted))
+      minted = Number(obj.mintedItemCount ?? obj.minted_count ?? obj.totalMinted);
+    if (!chain) chain = obj.chain ?? obj.network ?? null;
 
     for (const v of Object.values(obj)) {
       if (v && typeof v === 'object') walk(v, depth + 1);
@@ -288,8 +331,17 @@ function parseNextData(data) {
 
   walk(data?.props ?? data);
 
-  if (phases.length === 0) return null;
-  return { phases, name, chain, contract, total_supply, minted };
+  // Deduplicate phases by (name + time)
+  const seen = new Set();
+  const unique = phases.filter(p => {
+    const key = `${p.name}|${p.time}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  if (unique.length === 0) return null;
+  return { phases: unique, name, chain, contract, total_supply, minted };
 }
 
 /**
@@ -310,16 +362,29 @@ function parseOpenSeaApiBody(body) {
 }
 
 /**
- * Parse phase schedule from OpenSea page text.
+ * Parse phase schedule from OpenSea /overview page text.
+ *
+ * OpenSea overview renders phases in blocks like:
+ *
+ *   Allowlist
+ *   March 18 at 3:00 PM UTC
+ *   March 18 at 5:00 PM UTC        ← end time (optional)
+ *   0.05 ETH · max 2
+ *
+ *   Public
+ *   March 18 at 5:00 PM UTC
+ *   0.08 ETH · max 5
  */
 function parseOpenSeaPageText(text) {
   const phases = [];
 
   if (!text) return { phases };
 
-  // Look for countdown pattern
-  const countdownMatch = text.match(/[Mm]inting\s+in\s+(\d+)\s*(?:days?|d)?\s*(?:(\d+)\s*(?:hours?|h))?\s*(?:(\d+)\s*(?:min(?:utes?)?|m))?/);
-  if (countdownMatch) {
+  // Countdown: "Minting in 1 day 3 hours 20 minutes"
+  const countdownMatch = text.match(
+    /[Mm]inting\s+in\s+(?:(\d+)\s*days?)?\s*(?:(\d+)\s*hours?)?\s*(?:(\d+)\s*min(?:utes?)?)?/
+  );
+  if (countdownMatch && (countdownMatch[1] || countdownMatch[2] || countdownMatch[3])) {
     const d = parseInt(countdownMatch[1] || 0);
     const h = parseInt(countdownMatch[2] || 0);
     const m = parseInt(countdownMatch[3] || 0);
@@ -328,42 +393,49 @@ function parseOpenSeaPageText(text) {
     return { phases, countdown_detected: true };
   }
 
-  // Parse schedule list items
-  // Typical format: "Allowlist\nMarch 15 at 3:00 PM UTC\n0.05 ETH"
+  const MONTH_RE = /^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d/i;
+  const PRICE_RE = /^(\d+\.?\d*)\s*(ETH|SOL|MATIC|BNB|AVAX)/i;
+  const FREE_RE  = /^free$/i;
+  const LIMIT_RE = /max\s+(\d+)/i;
+
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-  const months = ['january','february','march','april','may','june','july','august','september','october','november','december'];
 
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];
 
-    // Check if next line is a date
-    if (i + 1 < lines.length) {
-      const dateLine = lines[i + 1];
-      const isDate = months.some(m => dateLine.toLowerCase().includes(m));
+    // A phase name is any non-date, non-price line followed by a date line
+    if (!MONTH_RE.test(line) && !PRICE_RE.test(line) && !FREE_RE.test(line)) {
+      const next = lines[i + 1] || '';
+      if (MONTH_RE.test(next)) {
+        const phase = { name: line, time: null, end_time: null, price: 'TBD', limit: null };
+        i++; // move to first date line
 
-      if (isDate) {
-        const phase = { name: line, time: null, price: 'TBD', limit: null };
+        // First date = start time
+        const startParsed = parseTime(lines[i]);
+        if (startParsed) phase.time = startParsed.toISOString();
+        i++;
 
-        // Parse the date line
-        const parsed = parseTime(dateLine);
-        if (parsed) phase.time = parsed.toISOString();
+        // If next line is also a date, treat as end time
+        if (i < lines.length && MONTH_RE.test(lines[i])) {
+          const endParsed = parseTime(lines[i]);
+          if (endParsed) phase.end_time = endParsed.toISOString();
+          i++;
+        }
 
-        // Check for price in subsequent lines
-        if (i + 2 < lines.length) {
-          const priceLine = lines[i + 2];
-          const priceMatch = priceLine.match(/(\d+\.?\d*)\s*(ETH|SOL|MATIC|BNB|AVAX)/i);
+        // Price line (may include "· max N")
+        if (i < lines.length) {
+          const priceLine = lines[i];
+          const priceMatch = priceLine.match(PRICE_RE);
           if (priceMatch) {
             phase.price = `${priceMatch[1]} ${priceMatch[2].toUpperCase()}`;
-            i += 3;
-          } else if (priceLine.toLowerCase().includes('free')) {
+            const limitMatch = priceLine.match(LIMIT_RE);
+            if (limitMatch) phase.limit = limitMatch[1];
+            i++;
+          } else if (FREE_RE.test(priceLine)) {
             phase.price = 'Free';
-            i += 3;
-          } else {
-            i += 2;
+            i++;
           }
-        } else {
-          i += 2;
         }
 
         phases.push(phase);
@@ -373,7 +445,7 @@ function parseOpenSeaPageText(text) {
     i++;
   }
 
-  // Fallback: look for price patterns
+  // Fallback: collect any price pattern if no phases found
   if (phases.length === 0) {
     const priceMatch = text.match(/(\d+\.?\d*)\s*(ETH|SOL|MATIC|BNB)/i);
     if (priceMatch) {
