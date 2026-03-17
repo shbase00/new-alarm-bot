@@ -16,6 +16,8 @@ async def help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "📅 Today's Mints — see today's schedule\n"
         "📢 Channels — manage alert channels\n"
         "🎛 Dashboard — main menu\n\n"
+        "/start — open bot\n"
+        "/status — bot status\n"
         "/cancel — cancel current action",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[

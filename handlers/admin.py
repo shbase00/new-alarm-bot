@@ -631,7 +631,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         delete_mint(mint_id)
         mints   = get_all_mints()
         await query.edit_message_text(
-            f"✅ <b>{name}</b> deleted.\n\n" + format_mint_list(mints),
+            f"🗑 <b>{name}</b> permanently deleted — all data removed.\n\n" + format_mint_list(mints),
             parse_mode='HTML', reply_markup=mint_list_kb(mints)
         )
 
