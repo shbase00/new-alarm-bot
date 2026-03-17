@@ -211,10 +211,10 @@ async function scrapeOpenSeaPage(url) {
       } catch {}
     });
 
-    // Navigate here (not in scrapeWithCallback) so interception is already active
+    // Navigate — interception already active
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
 
-    // ── Pass 1: __NEXT_DATA__ ──────────────────────────────────────────────
+    // ── Pass 1: __NEXT_DATA__ (available right after DOMContentLoaded) ─────
     const nextData = await page.evaluate(() => {
       try {
         const el = document.getElementById('__NEXT_DATA__');
@@ -230,18 +230,52 @@ async function scrapeOpenSeaPage(url) {
       }
     }
 
-    // ── Pass 2: wait up to 8 s more for XHR responses then check them ─────
-    await new Promise(r => setTimeout(r, 8000));
+    // ── Pass 2: poll for XHR data and DOM content up to 18 s ──────────────
+    // Phase data is loaded by client-side fetches after hydration.
+    // Poll every 2 s so we exit as soon as data arrives.
+    const MONTH_RE = /January|February|March|April|May|June|July|August|September|October|November|December/;
+    const PRICE_RE = /\d+\.?\d*\s*ETH/i;
+    const deadline = Date.now() + 18000;
 
-    for (const body of intercepted) {
-      const result = parseOpenSeaApiBody(body);
-      if (result && result.phases.length > 0) {
-        logger.info(`OpenSea XHR intercept found ${result.phases.length} phase(s) for ${url}`);
-        return result;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 2000));
+
+      // Check intercepted XHR responses first
+      for (const body of intercepted) {
+        const r = parseOpenSeaApiBody(body);
+        if (r && r.phases.length > 0) {
+          logger.info(`OpenSea XHR intercept found ${r.phases.length} phase(s) for ${url}`);
+          return r;
+        }
+      }
+
+      // Check all embedded JSON script tags (Next.js injects more after hydration)
+      const scriptResult = await page.evaluate(() => {
+        const scripts = [...document.querySelectorAll('script[type="application/json"], script#__NEXT_DATA__')];
+        return scripts.map(s => { try { return JSON.parse(s.textContent); } catch { return null; } }).filter(Boolean);
+      }).catch(() => []);
+
+      for (const blob of scriptResult) {
+        const r = parseNextData(blob);
+        if (r && r.phases.length > 0) {
+          logger.info(`OpenSea script tag found ${r.phases.length} phase(s) for ${url}`);
+          return r;
+        }
+      }
+
+      // Early exit: page text has dates and prices — text parser can handle it
+      const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+      if (MONTH_RE.test(bodyText) && PRICE_RE.test(bodyText)) {
+        const r = parseOpenSeaPageText(bodyText);
+        if (r.phases.length > 0) {
+          logger.info(`OpenSea text parse found ${r.phases.length} phase(s) for ${url}`);
+          r.text = bodyText;
+          return r;
+        }
       }
     }
 
-    // ── Pass 3: innerText fallback ─────────────────────────────────────────
+    // ── Pass 3: final innerText attempt ───────────────────────────────────
     const text = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
     const result = parseOpenSeaPageText(text);
     result.text = text;

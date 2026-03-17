@@ -102,6 +102,26 @@ function createApiServer(bot) {
   return server;
 }
 
+// ── Bot launch with 409 retry ──────────────────────────────────────────────────
+
+async function launchWithRetry(bot, maxRetries = 6) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      await bot.launch();
+      return;
+    } catch (err) {
+      const is409 = err.message && err.message.includes('409');
+      if (is409 && attempt < maxRetries) {
+        const delayMs = Math.min(Math.pow(2, attempt) * 2000, 30000); // 2s 4s 8s 16s 30s 30s
+        logger.warn(`409 Conflict (attempt ${attempt + 1}/${maxRetries}) — waiting ${delayMs / 1000}s for previous instance to stop...`);
+        await new Promise(r => setTimeout(r, delayMs));
+      } else {
+        throw err;
+      }
+    }
+  }
+}
+
 // ── Graceful shutdown ──────────────────────────────────────────────────────────
 
 function setupShutdown(bot, server) {
@@ -144,8 +164,8 @@ async function main() {
   // 6. Setup shutdown handlers
   setupShutdown(bot, server);
 
-  // 7. Launch Telegram bot
-  await bot.launch();
+  // 7. Launch Telegram bot (retry on 409 — previous instance may still be alive)
+  await launchWithRetry(bot);
   logger.info('Bot launched and polling for updates.');
 }
 
