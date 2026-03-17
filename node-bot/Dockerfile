@@ -52,8 +52,8 @@ RUN npm install --production
 # Copy application code
 COPY . .
 
-# Create data directory for SQLite
-RUN mkdir -p /app/data
+# Create /data directory for SQLite volume mount
+RUN mkdir -p /data
 
 # Set Chrome executable path for Railway/Docker
 ENV CHROME_PATH=/usr/bin/chromium
@@ -63,7 +63,8 @@ ENV CHROME_BIN=/usr/bin/chromium
 RUN groupadd -r appuser && useradd -r -g appuser -G audio,video appuser \
     && mkdir -p /home/appuser/Downloads \
     && chown -R appuser:appuser /home/appuser \
-    && chown -R appuser:appuser /app
+    && chown -R appuser:appuser /app \
+    && chown -R appuser:appuser /data
 
 USER appuser
 
