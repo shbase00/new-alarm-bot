@@ -130,7 +130,7 @@ async function searchCollection(query) {
   try {
     const resp = await axios.get(`${OS_API_BASE}/collections`, {
       headers: osHeaders(),
-      params: { limit: 5, include_hidden: false },
+      params: { limit: 5, include_hidden: false, collection_slug: query },
       timeout: 8000,
     });
     return resp.data?.collections || [];

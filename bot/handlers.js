@@ -365,16 +365,17 @@ async function handleRefreshMint(ctx, mintId) {
   const mint = db.getMintById(mintId);
   if (!mint) return;
 
-  const msg = await ctx.reply('🔄 Refreshing...');
+  let msg = null;
+  try { msg = await ctx.reply('🔄 Refreshing...'); } catch {}
   try {
     const count = await fetchMintedCount(mint);
     if (count !== null) db.updateMintedCount(mintId, count);
     const fresh = db.getMintById(mintId);
-    await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(() => {});
+    if (msg) await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(() => {});
     const text = formatMintCard(fresh);
     await safeReply(ctx, text, { parse_mode: 'HTML', ...mintActionsKeyboard(mintId) });
   } catch (err) {
-    await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(() => {});
+    if (msg) await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(() => {});
     await safeReply(ctx, `❌ Refresh failed: ${err.message}`);
   }
 }
@@ -586,6 +587,15 @@ async function handleCallback(ctx) {
     }
   }
   if (data === 'confirm_add_mint') return handleConfirmAddMint(ctx);
+  if (data === 'edit_before_add') {
+    // Drop back to manual name entry so user can correct detected data
+    const session = getSession(ctx.from.id);
+    if (session.detected) {
+      session.state = 'waiting_manual_name';
+      await safeReply(ctx, `✏️ Enter the <b>collection name</b>:`, { parse_mode: 'HTML', ...cancelKeyboard() });
+    }
+    return;
+  }
 
   // Dynamic patterns
   let m;
@@ -596,6 +606,7 @@ async function handleCallback(ctx) {
   if ((m = data.match(/^confirm_delete_(\d+)$/))) return handleConfirmDelete(ctx, parseInt(m[1]));
   if ((m = data.match(/^toggle_pause_(\d+)$/))) return handleTogglePause(ctx, parseInt(m[1]));
   if ((m = data.match(/^refresh_mint_(\d+)$/))) return handleRefreshMint(ctx, parseInt(m[1]));
+  if ((m = data.match(/^edit_phases_(\d+)$/))) return handleEditMint(ctx, parseInt(m[1]));
   if ((m = data.match(/^edit_field_(\d+)_(.+)$/))) return handleEditField(ctx, parseInt(m[1]), m[2]);
   if ((m = data.match(/^channel_settings_(-?\d+)$/))) return handleChannelSettings(ctx, m[1]);
   if ((m = data.match(/^toggle_alerts_(-?\d+)$/))) return handleToggleAlerts(ctx, m[1]);

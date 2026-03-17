@@ -37,7 +37,14 @@ function createApiServer(bot) {
       }
 
       let body = '';
-      req.on('data', chunk => { body += chunk; });
+      req.on('data', chunk => {
+        body += chunk;
+        if (body.length > 512 * 1024) { // 512 KB limit
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Payload too large' }));
+          req.destroy();
+        }
+      });
       req.on('end', async () => {
         try {
           const data = JSON.parse(body);

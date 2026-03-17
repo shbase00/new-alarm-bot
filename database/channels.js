@@ -44,6 +44,7 @@ function updateChannel(channelId, updates) {
     channel_name !== undefined ? channel_name : null,
     String(channelId)
   );
+  return getChannelById(channelId);
 }
 
 function deleteChannel(channelId) {

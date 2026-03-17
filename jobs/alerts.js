@@ -215,9 +215,6 @@ async function checkSweeps() {
   const liveMints = db.getMintsByStatus('live');
   const channels = getAlertChannels();
 
-  // Clean old events first
-  db.cleanOldSweepEvents(300);
-
   for (const mint of liveMints) {
     try {
       const slug = extractOpenSeaSlug(mint.os_link || mint.mint_link);
@@ -225,19 +222,20 @@ async function checkSweeps() {
 
       const sales = await fetchRecentSales(slug, 50);
       const now = Date.now();
+      const windowMs = SWEEP_WINDOW_SECONDS * 1000;
 
-      // Add recent sales as sweep events
-      for (const sale of sales) {
-        const saleTime = new Date(sale.event_timestamp * 1000 || sale.created_date).getTime();
-        if (now - saleTime < SWEEP_WINDOW_SECONDS * 1000) {
-          db.addSweepEvent(mint.id);
-        }
-      }
+      // Count sales directly from API response — no DB insert to avoid double-counting
+      const count = sales.filter(sale => {
+        const ts = sale.event_timestamp
+          ? sale.event_timestamp * 1000
+          : new Date(sale.created_date).getTime();
+        return now - ts < windowMs;
+      }).length;
 
-      const count = db.getSweepEventCount(mint.id, SWEEP_WINDOW_SECONDS);
       if (count < SWEEP_COUNT_THRESHOLD) continue;
 
-      const alertKey = `sweep_${Math.floor(Date.now() / 120000)}`; // 2-min dedup
+      // Dedup: one alert per sweep window duration
+      const alertKey = `sweep_${Math.floor(Date.now() / windowMs)}`;
       if (db.hasAlertBeenSent(mint.id, '', alertKey)) continue;
 
       db.markAlertSent(mint.id, '', alertKey);
